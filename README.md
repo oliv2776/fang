@@ -30,7 +30,7 @@ _Control your Neato vacuum locally with the fang of vacuula_
         Beta
       </a>
       <span> | </span>
-      <a href="https://brainslug.phma.dev">
+      <a href="https://tools.vacuula.phma.dev">
         Vacuula Tools
       </a>
 </div>
@@ -110,7 +110,7 @@ The reason this works on all Neato robots is because they all have the command i
 
 For this repair you will need some tools to connect an ESP device, if you already have an ESP device, awesome try using that, but if you don't already have one you should buy one according to what we have found works best. ESPs recommended by ESPHome (`ESP32`, `ESP32S3` and `ESP32C3`) will all work and have prebuilt files for easy installation, however some ESP devices that are very cheap and small should be avoided since they have some defects and need to use a lower power output on the wifi signal. Please check [supported-esp32.md](./supported-esp32.md) for more information!
 
-First of all we need to get the version of your robot, do this with the [Brainslug Tools](https://brainslug.phma.dev/#/robot)
+First of all we need to get the version of your robot, do this with the [Vacuula Tools](https://tools.vacuula.phma.dev/#/robot)
 
 Since we are parsing the data from the serial interface we need to be on the same verion of the robot firmware, this is what has been confirmed working:
 | `gen2`  | `gen3` |
