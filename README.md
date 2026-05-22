@@ -2,13 +2,13 @@
 [buymeacoffee-shield]: https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png
 
 <div align="center">
-  <img alt="neato-brainslug Logo" src="./pics/logo.svg" width="250">
-  <h1>neato-brainslug</h1>
+  <img alt="vacuula Logo" src="./pics/logo.svg" width="250">
+  <h1>fang of vacuula (formerly Brainslug)</h1>
 </div>
 
 <div align="center">
 
-_Control your Neato vacuum locally with an ESPHome brainslug_
+_Control your Neato vacuum locally with the fang of vacuula_
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/V7V61PBIY6)
 [![Buy me a coffee][buymeacoffee-shield]][buymeacoffee]
@@ -31,9 +31,13 @@ _Control your Neato vacuum locally with an ESPHome brainslug_
       </a>
       <span> | </span>
       <a href="https://brainslug.phma.dev">
-        Brainslug Tools
+        Vacuula Tools
       </a>
 </div>
+
+
+> [!NOTE]
+> We have found a way to make the Neato connect to a custom server and we are working on a custom app for this! Stay tuned, coming soon!
 
 
 
