@@ -1,0 +1,7 @@
+
+## Prochaines étapes
+
+- [ ] Firmware ESP32 : publier `odom` + `ranges` sur MQTT
+- [ ] Composant React : afficher la carte dans `brainslug-tools`
+- [ ] No-go zones / zone cleaning via ROS2 nav2
+- [ ] Return to dock via ROS2

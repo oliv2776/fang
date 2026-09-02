@@ -1,0 +1,22 @@
+
+## Ports utilisés
+
+| Port | Service | Description |
+|------|---------|-------------|
+| 2000 | REST API | Carte, statut, pose du robot |
+| 2001 | WebSocket | Flux temps réel (pose, map) vers l'interface web |
+| 2002 | rosbridge | WebSocket ROS2 → JSON (pour le front) |
+| 2003 | WS entrée | Données robot entrantes (alternative à MQTT) |
+| 1883 | MQTT | Broker (si intégré, sinon externe) |
+
+## Prérequis
+
+- Serveur Ubuntu 20.04+ avec Docker et Docker Compose installés
+- Le robot D7 gen3 avec ESP32 (Brainslug) sur le même réseau
+- L'ESP32 publie les données sur MQTT (ou WebSocket)
+- Ports 2000-2003 libres sur le serveur
+
+## Installation
+
+### Méthode 1 : Ligne de commande (recommandé)
+

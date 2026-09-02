@@ -1,0 +1,42 @@
+# Config slam_toolbox pour Neato D7 gen3 avec LiDAR 360°
+# Le LiDAR fait 360° avec ~720 points (résolution 0.5°)
+# Range typique : 0.1m à 8m, fréquence ~10-15 Hz
+
+slam_toolbox:
+  ros__parameters:
+    # --- Plugin ---
+    plugin_name: "slam_toolbox::LocalLocalizationSync"
+
+    # --- Frames ---
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+
+    # --- Scan matching (LiDAR 360°) ---
+    map_update_interval: 5.0
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.05
+    scan_buffer_size: 20
+    scan_buffer_maximum_scan_distance: 8.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+
+    # --- Localisation ---
+    localization: false
+    map_output_interval: 30.0
+
+    # --- TF ---
+    tf_buffer_duration: 30.0
+    transform_publish_period: 0.05
+
+    # --- Queue ---
+    map_queue_size: 5
+    pose_queue_size: 10
+    scan_queue_size: 10
+
+    # --- Filtre ---
+    filter_size: 1000
+    filter_size_max: 5000
+
+    # --- Debug ---
+    debug_file: ""

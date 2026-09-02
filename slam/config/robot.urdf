@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<robot name="neato_d7_gen3">
+   <!-- Base link : disque de ~18cm de rayon (D7 gen3) -->
+   <link name="base_link">
+     <visual>
+       <geometry>
+         <cylinder radius="0.18" length="0.08"/>
+       </geometry>
+       <material name="gray">
+         <color rgba="0.5 0.5 0.5 1.0"/>
+       </material>
+     </visual>
+     <inertial>
+       <mass value="3.5"/>
+       <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.02"/>
+     </inertial>
+   </link>
+
+   <!-- LiDAR 360° (RPLiDAR A1 ou équivalent) monté au centre, hauteur ~4cm -->
+   <link name="laser_link">
+     <visual>
+       <geometry>
+         <cylinder radius="0.03" length="0.03"/>
+       </geometry>
+       <material name="red">
+         <color rgba="1.0 0.0 0.0 1.0"/>
+       </material>
+     </visual>
+   </link>
+
+   <joint name="laser_joint" type="fixed">
+     <parent link="base_link"/>
+     <child link="laser_link"/>
+     <origin xyz="0.0 0.0 0.04" rpy="0 0 0"/>
+   </joint>
+
+   <!-- Roues (pour robot_state_publisher) -->
+   <link name="left_wheel"/>
+   <link name="right_wheel"/>
+
+   <joint name="left_wheel_joint" type="continuous">
+     <parent link="base_link"/>
+     <child link="left_wheel"/>
+     <origin xyz="0.0 0.09 0.0" rpy="0 0 0"/>
+     <axis xyz="0 1 0"/>
+   </joint>
+
+   <joint name="right_wheel_joint" type="continuous">
+     <parent link="base_link"/>
+     <child link="right_wheel"/>
+     <origin xyz="0.0 -0.09 0.0" rpy="0 0 0"/>
+     <axis xyz="0 1 0"/>
+   </joint>
+</robot>

@@ -1,0 +1,103 @@
+
+### Méthode 2 : Portainer
+
+Si tu utilises **Portainer** sur ton serveur, tu peux déployer le container
+sans toucher à la ligne de commande :
+
+#### Option A : Via un Stack (docker-compose)
+
+1. **Copier les fichiers** sur le serveur :
+   ```bash
+   # Depuis ta machine locale :
+   scp -r slam/ user@192.168.10.1:/opt/neato-brainslug/slam/
+   ```
+
+2. **Dans Portainer** :
+   - Aller dans **Stacks** → **Add stack**
+   - Nom : `neato-slam`
+   - Coller le contenu de `slam/docker-compose.yml` dans le champ "Web editor"
+   - Cliquer **Deploy the stack**
+
+3. **Configurer les variables d'environnement** :
+   - Dans Portainer, aller dans **Stacks** → `neato-slam` → **Edit**
+   - Ajouter les variables d'environnement (ou créer un `.env` dans le dossier)
+   - Les variables :
+     ```
+     MQTT_BROKER=192.168.10.126
+     MQTT_PORT=1883
+     MQTT_PREFIX=neato/robot
+     SLAM_MODE=mapping
+     REST_PORT=2000
+     WS_PORT=2001
+     ROSBRIDGE_PORT=2002
+     WS_IN_PORT=2003
+     ROBOT_TYPE=d7_gen3
+     ```
+
+4. **Redéployer** le stack pour appliquer les changements.
+
+#### Option B : Builder l'image manuellement
+
+1. **Copier les fichiers** sur le serveur :
+   ```bash
+   scp -r slam/ user@192.168.10.1:/opt/neato-brainslug/slam/
+   ```
+
+2. **SSH sur le serveur** et builder l'image :
+   ```bash
+   cd /opt/neato-brainslug
+   docker build -f slam/Dockerfile -t neato-slam:latest .
+   ```
+
+3. **Dans Portainer** :
+   - Aller dans **Containers** → **Add container**
+   - Image : `neato-slam:latest`
+   - Nom : `neato-slam`
+   - Network : `host` (important pour l'accès au réseau local)
+   - Variables d'environnement :
+     ```
+     ROS_DOMAIN_ID=0
+     RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+     MQTT_BROKER=192.168.10.126
+     MQTT_PORT=1883
+     MQTT_PREFIX=neato/robot
+     SLAM_MODE=mapping
+     REST_PORT=2000
+     WS_PORT=2001
+     ROSBRIDGE_PORT=2002
+     WS_IN_PORT=2003
+     ROBOT_TYPE=d7_gen3
+     ```
+   - Volumes :
+     ```
+     /opt/neato-brainslug/slam/maps:/app/maps
+     /opt/neato-brainslug/slam/logs:/app/logs
+     ```
+   - Restart policy : `Unless stopped`
+   - Cliquer **Launch the container**
+
+#### Option C : Importer l'image via Portainer
+
+Si tu as déjà builder l'image ailleurs :
+
+1. **Exporter l'image** :
+   ```bash
+   docker save neato-slam:latest -o neato-slam.tar
+   ```
+
+2. **Copier sur le serveur** :
+   ```bash
+   scp neato-slam.tar user@192.168.10.1:/tmp/
+   ```
+
+3. **Importer dans Portainer** :
+   - Aller dans **Images** → **Import image**
+   - Sélectionner le fichier `neato-slam.tar`
+   - Cliquer **Import**
+
+4. **Créer le container** comme dans l'Option B.
+
+## Utilisation
+
+### API REST
+
