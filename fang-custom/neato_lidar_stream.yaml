@@ -1,0 +1,68 @@
+# fang-custom/neato_lidar_stream.yaml
+#
+# Exemple d'intégration du composant neato_lidar dans un YAML ESPHome.
+# À inclure dans la section "uart:" et "mqtt:" de votre config principale.
+#
+# Contrainte : le robot Neato doit être en mode "lidar streaming" actif
+# (contrôlé par les entités start/stop existantes, pas modifiées ici).
+
+# --- Section UART (à ajouter dans votre config existante) ---
+uart:
+  - id: neato_uart
+    tx_pin: GPIO1
+    rx_pin: GPIO3
+    baud_rate: 115200
+    stop_bits: 1
+    # Pas de parity, pas de flow control
+    # Le robot envoie en continu quand le lidar est actif
+
+# --- Section MQTT (à ajouter dans votre config existante) ---
+mqtt:
+  - id: neato_mqtt
+    broker: 192.168.1.10
+    username: "neato"
+    password: "secret"
+    # Le topic de publication sera : neato/<device_id>/scan
+    # Format binaire : [magic(2)] [count(1)] [version(1)] [points(5400)]
+    # Chaque point : angle(uint16 LE) + distance(uint16 LE, mm) + intensity(uint8)
+
+# --- Composant custom neato_lidar ---
+# À placer dans la section "neato_lidar:" (auto-load via __init__.py)
+neato_lidar:
+  - platform: custom
+    device_id: "neato-d70-001"
+    mqtt_topic: "neato/neato-d70-001/scan"
+    scan_interval: 100ms
+    uart_id: neato_uart
+    mqtt_id: neato_mqtt
+
+# --- Note sur le format binaire publié ---
+#
+# Offset 0-1   : Magic bytes 0x4C 0x44 ("LD")
+# Offset 2     : Nombre de scans (1 = scan complet de 1080 points)
+# Offset 3     : Version du format (0x01)
+# Offset 4..   : 1080 points x 5 octets :
+#    [0]        : angle LSB   (uint16, 0..1079, résolution 0.33°)
+#    [1]        : angle MSB
+#    [2]        : distance LSB (uint16, en mm, 0..65535)
+#    [3]        : distance MSB
+#    [4]        : intensité   (uint8, 0..255)
+#
+# Taille totale du payload : 4 + 5400 = 5404 octets
+# MQTT QoS 0, retain=false -> pas de surcharge broker
+#
+# Côté subscriber (Python exemple) :
+#   import struct
+#   def on_scan(msg):
+#       data = msg.payload
+#       magic = data[0:2]
+#       count = data[2]
+#       version = data[3]
+#       points = []
+#       for i in range(1080):
+#           offset = 4 + i * 5
+#           angle = struct.unpack_from('<H', data, offset)[0]
+#           dist   = struct.unpack_from('<H', data, offset + 2)[0]
+#           inten = data[offset + 4]
+#           points.append((angle, dist, inten))
+#       return points
