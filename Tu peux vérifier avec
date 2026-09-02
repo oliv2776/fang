@@ -1,0 +1,2 @@
+python3 -m py_compile slam/src/slam_bridge.py
+python3 -m py_compile slam/src/slam_server.py

@@ -5,20 +5,20 @@ Reçoit les données du robot Neato D7 gen3 (via MQTT ou WebSocket) et les publi
 en topics ROS2 pour slam_toolbox.
 
 Le D7 gen3 a un LiDAR 360° (RPLiDAR A1 ou équivalent) :
-   - ~720 points par scan (résolution 0.5°)
-   - Range : 0.1m à 8m
-   - Fréquence : ~10-15 Hz
+    - ~720 points par scan (résolution 0.5°)
+    - Range : 0.1m à 8m
+    - Fréquence : ~10-15 Hz
 
 Topics MQTT attendus (payload JSON) :
-  neato/robot/odom       -> {"x": float, "y": float, "theta": float, "timestamp": float}
-  neato/robot/ranges     -> {"ranges": [float,...], "angle_min": float, "angle_max": float,
-                              "angle_increment": float, "timestamp": float}
-  neato/robot/cmd_vel    -> {"linear_x": float, "angular_z": float}
+  neato/robot/odom        -> {"x": float, "y": float, "theta": float, "timestamp": float}
+  neato/robot/ranges      -> {"ranges": [float,...], "angle_min": float, "angle_max": float,
+                               "angle_increment": float, "timestamp": float}
+  neato/robot/cmd_vel     -> {"linear_x": float, "angular_z": float}
 
 Topics ROS2 publiés :
-    /odom          -> nav_msgs/Odometry
-    /scan          -> sensor_msgs/LaserScan
-    /cmd_vel       -> geometry_msgs/Twist
+    /odom           -> nav_msgs/Odometry
+    /scan           -> sensor_msgs/LaserScan
+    /cmd_vel        -> geometry_msgs/Twist
   TF: odom -> base_link
 """
 
@@ -53,46 +53,46 @@ class SlamBridge(Node):
     def __init__(self):
         super().__init__('slam_bridge')
 
-         # --- Déclarations de paramètres ---
+        # --- Déclarations de paramètres ---
         self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.126').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
         self.ws_port = int(self.declare_parameter('ws_port', 2003).value)
 
-         # --- Publishers ROS2 ---
+        # --- Publishers ROS2 ---
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
         self.scan_pub = self.create_publisher(LaserScan, '/scan', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
 
-         # --- État ---
+        # --- État ---
         self._odom_lock = threading.Lock()
         self._last_odom = None
 
-         # --- MQTT ---
+        # --- MQTT ---
         self._mqtt_client = None
         self._mqtt_connected = False
         self._mqtt_reconnect_timer = None
         if HAS_MQTT:
             self._init_mqtt()
 
-         # --- WebSocket (pour les clients qui préfèrent WS) ---
+        # --- WebSocket (pour les clients qui préfèrent WS) ---
         if HAS_WS:
             self._init_websocket()
 
         self.get_logger().info(
             f"slam_bridge initialisé | MQTT={self.mqtt_broker}:{self.mqtt_port} "
             f"WS=:{self.ws_port} prefix={self.mqtt_prefix}"
-         )
+        )
 
-     # ------------------------------------------------------------------ MQTT
+    # ------------------------------------------------------------------ MQTT
     def _init_mqtt(self):
         try:
             self._mqtt_client = mqtt.Client(
                 callback_api_version=mqtt.CallbackAPIVersion.VERSION1
-             )
+            )
         except AttributeError:
-             # paho-mqtt < 2.0 : API classique
+            # paho-mqtt < 2.0 : API classique
             self._mqtt_client = mqtt.Client()
 
         self._mqtt_client.on_connect = self._on_mqtt_connect
@@ -105,15 +105,15 @@ class SlamBridge(Node):
         try:
             self._mqtt_client.connect(
                 self.mqtt_broker, self.mqtt_port, keepalive=60
-             )
+            )
             self._mqtt_client.loop_start()
             self.get_logger().info(
                 f"MQTT connecté à {self.mqtt_broker}:{self.mqtt_port}"
-             )
+            )
         except Exception as e:
             self.get_logger().error(
                 f"MQTT connect failed: {e}, retry in 5s..."
-             )
+            )
             self._mqtt_reconnect_timer = threading.Timer(5.0, self._connect_mqtt)
             self._mqtt_reconnect_timer.daemon = True
             self._mqtt_reconnect_timer.start()
@@ -134,7 +134,7 @@ class SlamBridge(Node):
         if rc != 0:
             self.get_logger().warn(
                 f"MQTT déconnecté (rc={rc}), reconnexion dans 5s..."
-             )
+            )
             self._mqtt_reconnect_timer = threading.Timer(5.0, self._connect_mqtt)
             self._mqtt_reconnect_timer.daemon = True
             self._mqtt_reconnect_timer.start()
@@ -153,7 +153,7 @@ class SlamBridge(Node):
         elif topic.endswith('/cmd_vel'):
             self._handle_cmd_vel(data)
 
-     # ------------------------------------------------------------- WebSocket
+    # ------------------------------------------------------------- WebSocket
     def _init_websocket(self):
         self._ws_loop = asyncio.new_event_loop()
         self._ws_thread = threading.Thread(target=self._run_ws, daemon=True)
@@ -192,7 +192,7 @@ class SlamBridge(Node):
         except Exception as e:
             self.get_logger().error(f"WS server error: {e}")
 
-     # --------------------------------------------------------- Handlers
+    # --------------------------------------------------------- Handlers
     def _handle_odom(self, data: dict):
         x = float(data.get('x', 0.0))
         y = float(data.get('y', 0.0))
@@ -202,7 +202,7 @@ class SlamBridge(Node):
         with self._odom_lock:
             self._last_odom = (x, y, theta, ts)
 
-         # Publier /odom
+        # Publier /odom
         odom = Odometry()
         odom.header.stamp = self.get_clock().now().to_msg()
         odom.header.frame_id = 'odom'
@@ -213,18 +213,18 @@ class SlamBridge(Node):
         odom.pose.pose.position.z = 0.0
         odom.pose.pose.orientation = self._euler_to_quat(theta)
 
-         # Covariance (valeur par défaut, à affiner selon le capteur)
+        # Covariance (valeur par défaut, à affiner selon le capteur)
         odom.pose.covariance = [
-             0.001, 0, 0, 0, 0, 0,
-             0, 0.001, 0, 0, 0, 0,
-             0, 0, 0, 0, 0, 0,
-             0, 0, 0, 0.001, 0, 0,
-             0, 0, 0, 0, 0, 0,
-             0, 0, 0, 0, 0, 0,
-         ]
+            0.001, 0, 0, 0, 0, 0,
+            0, 0.001, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0.001, 0, 0,
+            0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0,
+        ]
         self.odom_pub.publish(odom)
 
-         # Publier TF odom -> base_link
+        # Publier TF odom -> base_link
         t = TransformStamped()
         t.header.stamp = odom.header.stamp
         t.header.frame_id = 'odom'
@@ -241,21 +241,21 @@ class SlamBridge(Node):
         angle_max = float(data.get('angle_max', 2 * math.pi))
         angle_inc = float(data.get('angle_increment', 0.0))
 
-         # Pour le D7 gen3 avec LiDAR 360° :
-         # Si angle_increment n'est pas fourni ou est 0, on le calcule
-         # à partir du nombre de points
+        # Pour le D7 gen3 avec LiDAR 360° :
+        # Si angle_increment n'est pas fourni ou est 0, on le calcule
+        # à partir du nombre de points
         if angle_inc <= 0.0 and len(ranges) > 1:
             angle_inc = (angle_max - angle_min) / len(ranges)
 
-         # Si on a exactement 720 points (résolution 0.5°), on force
+        # Si on a exactement 720 points (résolution 0.5°), on force
         if len(ranges) == 720 and abs(angle_inc - 0.0) < 0.001:
             angle_inc = (2 * math.pi) / 720.0
 
-         # Si on a 360 points (résolution 1°), on force
+        # Si on a 360 points (résolution 1°), on force
         if len(ranges) == 360 and abs(angle_inc - 0.0) < 0.001:
             angle_inc = (2 * math.pi) / 360.0
 
-         # Sécurité : si on n'a toujours pas d'angle_inc valide, on utilise 0.5°
+        # Sécurité : si on n'a toujours pas d'angle_inc valide, on utilise 0.5°
         if angle_inc <= 0.0:
             angle_inc = (2 * math.pi) / 720.0
 
@@ -278,14 +278,14 @@ class SlamBridge(Node):
         twist.angular.z = float(data.get('angular_z', 0.0))
         self.cmd_vel_pub.publish(twist)
 
-     @staticmethod
+    @staticmethod
     def _euler_to_quat(theta: float) -> Quaternion:
         return Quaternion(
             x=0.0,
             y=0.0,
             z=math.sin(theta / 2.0),
             w=math.cos(theta / 2.0),
-         )
+        )
 
 
 def main(args=None):
