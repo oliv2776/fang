@@ -1,4 +1,10 @@
-version: "3.9"
+# Neato Brainslug - SLAM Container
+# Lancer depuis le dossier slam/ :
+#   docker compose up -d --build
+#
+# Pour Portainer :
+#   Stacks -> Add stack -> coller ce fichier
+#   (ou builder l'image manuellement, voir README.md)
 
 services:
   slam:
@@ -9,30 +15,30 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-       - ROS_DOMAIN_ID=0
-       - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-       - MQTT_BROKER=${MQTT_BROKER:-192.168.10.126}
-       - MQTT_PORT=${MQTT_PORT:-1883}
-       - MQTT_PREFIX=${MQTT_PREFIX:-neato/robot}
-       - SLAM_MODE=${SLAM_MODE:-mapping}
-       - REST_PORT=${REST_PORT:-2000}
-       - WS_PORT=${WS_PORT:-2001}
-       - ROSBRIDGE_PORT=${ROSBRIDGE_PORT:-2002}
-       - WS_IN_PORT=${WS_IN_PORT:-2003}
-       - ROBOT_TYPE=${ROBOT_TYPE:-d7_gen3}
+        - ROS_DOMAIN_ID=0
+        - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+        - MQTT_BROKER=${MQTT_BROKER:-192.168.10.126}
+        - MQTT_PORT=${MQTT_PORT:-1883}
+        - MQTT_PREFIX=${MQTT_PREFIX:-neato/robot}
+        - SLAM_MODE=${SLAM_MODE:-mapping}
+        - REST_PORT=${REST_PORT:-2000}
+        - WS_PORT=${WS_PORT:-2001}
+        - ROSBRIDGE_PORT=${ROSBRIDGE_PORT:-2002}
+        - WS_IN_PORT=${WS_IN_PORT:-2003}
+        - ROBOT_TYPE=${ROBOT_TYPE:-d7_gen3}
     volumes:
-       - ./maps:/app/maps
-       - ./logs:/app/logs
+        - ./maps:/app/maps
+        - ./logs:/app/logs
 
-  # Broker MQTT (décommenter si pas déjà installé sur le serveur)
-  # mqtt:
-  #   image: eclipse-mosquitto:2
+   # Broker MQTT (décommenter si pas déjà installé sur le serveur)
+   # mqtt:
+   #   image: eclipse-mosquitto:2
    #   container_name: neato-mqtt
    #   restart: unless-stopped
    #   ports:
-   #      - "1883:1883"
-   #      - "9001:9001"
+   #       - "1883:1883"
+   #       - "9001:9001"
    #   volumes:
-   #      - ./mosquitto/config:/mosquitto/config
-   #      - ./mosquitto/data:/mosquitto/data
-   #      - ./mosquitto/log:/mosquitto/log
+   #       - ./mosquitto/config:/mosquitto/config
+   #       - ./mosquitto/data:/mosquitto/data
+   #       - ./mosquitto/log:/mosquitto/log

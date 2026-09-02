@@ -34,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-std-srvs \
         ros-humble-visualization-msgs \
         ros-humble-map-server \
-       && rm -rf /var/lib/apt/lists/*
+        && rm -rf /var/lib/apt/lists/*
 
 # --- Dépendances Python ---
 COPY slam/requirements.txt /tmp/requirements.txt
@@ -47,7 +47,7 @@ COPY slam/config/ /app/config/
 COPY slam/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
-# --- Ports exposés ---
+# --- Ports exposés (ignorés avec network_mode: host, mais utiles pour la doc) ---
 # 2000   REST API (carte, statut, pose)
 # 2001   WebSocket (flux temps réel vers l'interface web)
 # 2002   rosbridge (WebSocket ROS2 -> JSON)

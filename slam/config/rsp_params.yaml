@@ -1,3 +1,6 @@
+# Paramètres pour robot_state_publisher
+# On utilise robot_description_file avec un chemin absolu
+# car le package ROS2 "neato_brainslug" n'existe pas dans le container
 robot_state_publisher:
   ros__parameters:
-    robot_description: "$(find neato_brainslug)/urdf/robot.urdf"
+    robot_description_file: "/app/config/robot.urdf"

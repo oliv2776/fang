@@ -5,62 +5,64 @@ robot_localization:
     base_link_frame: base_link
     world_frame: odom
 
-    # Odométrie (encodeurs via ESP32)
+     # Odométrie (encodeurs via ESP32)
     odom0: /odom
     odom0_config:
-       - true
-       - true
-       - false
-       - false
-       - false
-       - true
-       - false
-       - false
-       - true
-       - false
-       - false
-       - false
+        - true       # x
+        - true       # y
+        - false      # z
+        - false      # roll
+        - false      # pitch
+        - true       # yaw
+        - false      # x vel
+        - false      # y vel
+        - true       # yaw vel
+        - false
+        - false
+        - false
 
-    # LiDAR 360° (scan matching pour la localisation)
+     # LiDAR 360° (scan matching pour la localisation)
+     # Note : le nom "imu0" est un héritage du template ekf,
+     # ici c'est bien un scan laser, pas un IMU
     imu0: /scan
     imu0_config:
-       - false
-       - false
-       - false
-       - false
-       - false
-       - true
-       - false
-       - false
-       - false
-       - false
-       - false
-       - false
+        - false
+        - false
+        - false
+        - false
+        - false
+        - true       # yaw (le scan donne une info d'orientation)
+        - false
+        - false
+        - false
+        - false
+        - false
+        - false
 
     process_noise_covariance:
-       - 0.05
-       - 0.0
-       - 0.0
-       - 0.0
-       - 0.0
-       - 0.03
-       - 0.0
-       - 0.0
-       - 0.0
-       - 0.0
-       - 0.0
-       - 0.0
+        - 0.05
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.03
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
 
     initial_estimate_covariance:
-       - 1e-9
-       - 0.0
-       - 0.0
-       - 0.0
-       - 0.0
-       - 1e-9
-       - 0.0
-       - 0.0
-       - 0.0
-       - 0.0
-       - 0.0
-       - 1e-9
+        - 1e-9
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1e-9
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 0.0
+        - 1e-9

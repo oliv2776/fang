@@ -4,15 +4,20 @@
 
 slam_toolbox:
   ros__parameters:
-    # --- Plugin ---
+     # --- Plugin ---
     plugin_name: "slam_toolbox::LocalLocalizationSync"
 
-    # --- Frames ---
+     # --- Lifecycle ---
+     # Important : sans ça, le nœud reste en état "unconfigured"
+     # et ne publie jamais /map
+    use_lifecycle: false
+
+     # --- Frames ---
     odom_frame: odom
     map_frame: map
     base_frame: base_link
 
-    # --- Scan matching (LiDAR 360°) ---
+     # --- Scan matching (LiDAR 360°) ---
     map_update_interval: 5.0
     minimum_travel_distance: 0.05
     minimum_travel_heading: 0.05
@@ -21,22 +26,22 @@ slam_toolbox:
     link_match_minimum_response_fine: 0.1
     link_scan_maximum_distance: 1.5
 
-    # --- Localisation ---
+     # --- Localisation ---
     localization: false
     map_output_interval: 30.0
 
-    # --- TF ---
+     # --- TF ---
     tf_buffer_duration: 30.0
     transform_publish_period: 0.05
 
-    # --- Queue ---
+     # --- Queue ---
     map_queue_size: 5
     pose_queue_size: 10
     scan_queue_size: 10
 
-    # --- Filtre ---
+     # --- Filtre ---
     filter_size: 1000
     filter_size_max: 5000
 
-    # --- Debug ---
+     # --- Debug ---
     debug_file: ""
