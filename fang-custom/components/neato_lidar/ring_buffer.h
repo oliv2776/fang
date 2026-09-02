@@ -8,9 +8,9 @@
  * RingBuffer<T, N>
  * Buffer circulaire de taille fixe, alloué statiquement.
  * Conçu pour l'ESP32 classique (520 KB SRAM) :
- *    - Pas de malloc / new
- *    - Pas de fragmentation
- *    - Taille connue au compile-time
+ *     - Pas de malloc / new
+ *     - Pas de fragmentation
+ *     - Taille connue au compile-time
  *
  * Usage typique :
  *   RingBuffer<uint8_t, 4096> scan_buf;
@@ -58,14 +58,17 @@ class RingBuffer {
     return to_read;
   }
 
-  // Lire un seul octet sans dépiler (peek)
-  T peek() const {
-    return (count_ > 0) ? buffer_[tail_] : T{};
+  // Lire un seul octet sans dépiler (peek).
+  // Renvoie false si le buffer est vide (évite de retourner une valeur par défaut trompeuse).
+  bool peek(T &out) const {
+    if (count_ == 0) return false;
+    out = buffer_[tail_];
+    return true;
   }
 
   // --- État ---
   bool empty() const { return count_ == 0; }
-  bool full()  const { return count_ == N; }
+  bool full() const { return count_ == N; }
   size_t size() const { return count_; }
   size_t capacity() const { return N; }
 

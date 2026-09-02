@@ -7,13 +7,17 @@ namespace neato_lidar {
 static const char *TAG = "neato_lidar";
 
 void NeatoLidarComponent::setup() {
+  PollingComponent::setup();
   ESP_LOGCONFIG(TAG, "NeatoLidarComponent: device_id='%s', topic='%s', interval=%u ms",
                 device_id_.c_str(), mqtt_topic_.c_str(), publish_interval_);
   ESP_LOGCONFIG(TAG, "Ring buffer capacity: %u bytes (scan size: %u bytes)",
                 LIDAR_RING_SIZE, LIDAR_SCAN_SIZE);
+
+  // S'enregistrer comme reader du composant UART
+  this->uart_component_->register_reader(this);
 }
 
-void NeatoLidarComponent::on_uart_data(uint8_t data) {
+void NeatoLidarComponent::on_data(uint8_t data) {
   // On écrit chaque octet dans le ring buffer
   if (!ring_.write_byte(data)) {
     // Buffer plein : on réinitialise pour éviter la corruption
@@ -48,7 +52,7 @@ bool NeatoLidarComponent::try_parse_and_publish() {
   // Header
   msg_buf[0] = LIDAR_MAGIC_0;
   msg_buf[1] = LIDAR_MAGIC_1;
-  msg_buf[2] = 0x01;   // 1 scan complet
+  msg_buf[2] = 0x01;  // 1 scan complet
   msg_buf[3] = LIDAR_FORMAT_VERSION;
 
   // Copie du scan depuis le ring buffer
@@ -60,16 +64,13 @@ bool NeatoLidarComponent::try_parse_and_publish() {
 
   // Validation rapide : vérifier que les angles sont cohérents
   // (angle[i] devrait être proche de i, modulo 1080)
-  bool valid = true;
   for (size_t i = 0; i < LIDAR_POINTS_PER_SCAN; i++) {
     size_t offset = 4 + i * LIDAR_BYTES_PER_POINT;
     uint16_t angle = static_cast<uint16_t>(msg_buf[offset]) |
-                      (static_cast<uint16_t>(msg_buf[offset + 1]) << 8);
+                     (static_cast<uint16_t>(msg_buf[offset + 1]) << 8);
     // Tolérance de ±5 points (1.65°)
     int16_t diff = static_cast<int16_t>(angle - static_cast<int16_t>(i));
     if (diff > 5 || diff < -5) {
-      // On ajuste : le scan peut être décalé
-      // On ne rejette pas, on log juste
       if (i == 0) {
         ESP_LOGD(TAG, "Scan offset detected: first angle=%u (expected 0)", angle);
       }
@@ -92,12 +93,8 @@ void NeatoLidarComponent::publish_scan(const uint8_t *data, size_t len) {
 }
 
 void NeatoLidarComponent::update() {
-  // La publication se fait dans on_uart_data() dès qu'un scan complet est reçu.
-  // update() sert juste à envoyer la commande périodiquement si le robot
-  // ne l'envoie pas en continu.
-  // On n'envoie pas GetLDSScan ici car le robot Neato stream en continu
-  // quand le mode lidar est actif (contrôlé par les entités existantes).
-  // On peut juste log le taux de publication.
+  // La publication se fait dans on_data() dès qu'un scan complet est reçu.
+  // update() sert juste à log le taux de publication périodiquement.
   static uint32_t last_log_ms = 0;
   if (millis() - last_log_ms > 10000) {
     ESP_LOGD(TAG, "Lidar stream active, last publish %u ms ago",
@@ -106,5 +103,5 @@ void NeatoLidarComponent::update() {
   }
 }
 
-}   // namespace neato_lidar
-}   // namespace esphome
+}  // namespace neato_lidar
+}  // namespace esphome
