@@ -82,6 +82,8 @@ class CoveragePlanner(Node):
 
         self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.108').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
+        self.mqtt_username = self.declare_parameter('mqtt_username', '').value
+        self.mqtt_password = self.declare_parameter('mqtt_password', '').value
         self.mqtt_clean_cmd_topic = self.declare_parameter(
             'mqtt_clean_cmd_topic', 'neato/robot/clean_cmd'
         ).value
@@ -166,11 +168,28 @@ class CoveragePlanner(Node):
             self._mqtt_client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
         except AttributeError:
             self._mqtt_client = mqtt.Client()
+        if self.mqtt_username:
+            self._mqtt_client.username_pw_set(self.mqtt_username, self.mqtt_password)
+        self._mqtt_client.on_connect = self._on_mqtt_connect
         try:
             self._mqtt_client.connect(self.mqtt_broker, self.mqtt_port, keepalive=60)
             self._mqtt_client.loop_start()
         except Exception as e:
             self.get_logger().error(f"MQTT connect failed (coverage_planner): {e}")
+
+    def _on_mqtt_connect(self, client, userdata, flags, rc):
+        # Avant ce correctif, cette connexion échouait silencieusement en
+        # cas de mauvais identifiants (rc=5) - rien ne le signalait, la
+        # brosse/aspirateur ne se déclenchait juste jamais sans explication.
+        if rc == 0:
+            self.get_logger().info(f"MQTT connecté (coverage_planner) à {self.mqtt_broker}:{self.mqtt_port}")
+        elif rc == 5:
+            self.get_logger().error(
+                "MQTT connect rc=5 (accès refusé) sur coverage_planner - "
+                "vérifie mqtt_username/mqtt_password."
+            )
+        else:
+            self.get_logger().error(f"MQTT connect rc={rc} (coverage_planner)")
 
     def _publish_clean_cmd(self, on: bool):
         if self._mqtt_client is None:
