@@ -93,6 +93,7 @@ class SlamServer(Node):
         self.start_explore_pub = self.create_publisher(Bool, '/start_explore', 10)
         self.return_to_dock_pub = self.create_publisher(Bool, '/return_to_dock', 10)
         self.set_home_pub = self.create_publisher(Bool, '/set_home_position', 10)
+        self.dock_native_pub = self.create_publisher(Bool, '/dock_native_request', 10)
         # /cmd_vel : MÊME topic que Nav2 (voir slam_bridge.py::_on_nav2_cmd_vel,
         # déjà relié jusqu'à SetMotor côté ESP). La téléopération réutilise
         # tel quel tout le pipeline existant, rien de nouveau côté ESP.
@@ -358,6 +359,31 @@ class SlamServer(Node):
             msg.data = True
             self.set_home_pub.publish(msg)
             return jsonify({"status": "home_position_set"})
+
+        @app.route('/api/dock/native', methods=['POST'])
+        def dock_native():
+            # Retour au socle NATIF (recommandé) : utilise la balise
+            # infrarouge du Neato via son mode "Clean House" - marche
+            # depuis n'importe où, pas besoin d'être déjà près du socle.
+            # ⚠️ Réactive brièvement brosse+aspirateur (impossible à
+            # éviter, contrainte du protocole Neato lui-même - House et
+            # CleaningDisable sont mutuellement exclusifs).
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de démarrer"
+                    }), 409
+            msg = Bool()
+            msg.data = True
+            self.dock_native_pub.publish(msg)
+            return jsonify({"status": "native_dock_requested"})
+
+        @app.route('/api/dock/native/stop', methods=['POST'])
+        def dock_native_stop():
+            msg = Bool()
+            msg.data = False
+            self.dock_native_pub.publish(msg)
+            return jsonify({"status": "native_dock_stop_requested"})
 
         @app.route('/api/teleop', methods=['POST'])
         def teleop():
