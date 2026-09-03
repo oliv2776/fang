@@ -1,0 +1,352 @@
+# config/comp/slam-odom.yaml
+#
+# À inclure dans config/local.yaml (section "packages:").
+#
+# Le parsing des réponses UART (GetMotor, GetLDSScan, GetDigitalSensors,
+# GetAnalogSensors) est fait dans config/comp/gen3.yaml, dans le même
+# parseur que GetCharger/GetState/etc. Ce fichier ajoute :
+#   1. Le composant mqtt: (broker) nécessaire aux publish
+#   2. Le round-robin d'envoi des commandes sur l'unique fil UART partagé
+#   3. La réception cmd_vel (Nav2 -> MQTT -> SetMotor)
+#   4. La réception des commandes brosse/aspirateur (Clean CleaningEnable/Disable)
+#
+# ⚠️ SÉCURITÉ - ARCHITECTURE DE CE FICHIER :
+# GetDigitalSensors (chocs, roue soulevée) et GetAnalogSensors (détection
+# de vide/chute) sont maintenant vérifiés BEAUCOUP plus souvent que le
+# reste (2 tours sur 9 chacun, contre 1 seul pour GetMotor/GetLDSScan/
+# SetMotor) - la séquence ci-dessous alterne volontairement sécurité et
+# tâches normales à chaque pas. Dès qu'un choc, une roue soulevée ou un
+# vide est détecté, gen3.yaml envoie un SetMotor d'arrêt IMMÉDIATEMENT
+# (sans attendre son tour dans le round-robin) et pose g_safety_stop à
+# true, qui reste vrai tant que rien ne le réinitialise explicitement
+# (voir g_safety_stop plus bas - PAS de reprise automatique).
+#
+# Ceci dit, cette architecture reste fondamentalement une architecture de
+# POLLING sur un fil unique, pas un capteur temps réel. Entre deux
+# vérifications sécurité (environ 1x/seconde avec les réglages par
+# défaut), le robot peut avancer un peu "à l'aveugle". Les vitesses dans
+# nav2_params.yaml et le lookahead SetMotor ci-dessous sont volontairement
+# très bas pour limiter la distance parcourue dans cette fenêtre aveugle -
+# NE LES AUGMENTE PAS sans essais progressifs et supervision physique.
+
+substitutions:
+  # Doivent correspondre à MQTT_BROKER / MQTT_PORT / MQTT_PREFIX dans
+  # slam/.env (côté conteneur Docker).
+  mqtt_broker: "192.168.10.126"
+  mqtt_port: "1883"
+  mqtt_wheels_topic: "neato/robot/wheels"
+  mqtt_scan_topic: "neato/robot/scan"
+  mqtt_safety_topic: "neato/robot/safety"
+  # Doit correspondre à CMD_VEL_OUT_TOPIC dans slam/.env.
+  mqtt_cmd_vel_topic: "neato/robot/cmd_vel_out"
+  # Commandes ponctuelles brosse/aspirateur, publiées par le conteneur
+  # Docker (coverage_planner.py) au début/à la fin d'un cycle de nettoyage.
+  mqtt_clean_cmd_topic: "neato/robot/clean_cmd"
+
+  # Intervalle entre CHAQUE pas du round-robin (9 pas au total par cycle
+  # complet, voir la séquence dans le script ci-dessous).
+  slam_poll_interval: 500ms
+
+  # Si aucun cmd_vel_out frais depuis plus longtemps que ça, arrêt auto.
+  cmd_vel_stale_timeout: 2500ms
+
+  # Anticipation (secondes) utilisée pour convertir une vitesse en
+  # distance de roue pour SetMotor. Doit couvrir au moins un cycle complet
+  # du round-robin (9 x slam_poll_interval = 4.5s par défaut) + marge.
+  setmotor_lookahead_s: "5.0"
+
+  # DOIT rester cohérent avec wheel_base_m dans slam_bridge.py (côté
+  # Docker) - après calibration (voir slam/calibrate.py), reporte la
+  # valeur finale aussi dans le paramètre ROS wheel_base_m du bridge.
+  # Cette valeur n'est qu'un POINT DE DÉPART : le vrai réglage vit dans le
+  # global g_cal_wheel_base_m ci-dessous (calibrable à chaud, persisté en
+  # flash), pas dans cette substitution figée à la compilation.
+  wheel_base_m_default: "0.248"
+
+  # Point de départ du seuil de détection de vide, en mm - vrai réglage
+  # dans g_cal_drop_threshold_mm (calibrable à chaud, persisté en flash).
+  drop_threshold_mm_default: "60"
+
+  # Vitesse max envoyée à SetMotor, en mm/s - unité non confirmée, gardée
+  # volontairement basse (voir avertissement dans le Dockerfile/README).
+  setmotor_max_speed: "80"
+
+mqtt:
+  - id: neato_mqtt
+    broker: ${mqtt_broker}
+    port: ${mqtt_port}
+    # Le Mosquitto intégré à Home Assistant refuse les connexions
+    # anonymes (confirmé côté Docker : erreur "rc=5" dans bridge.log sans
+    # ça). Ajoute ces deux clés dans ton secrets.yaml ESPHome :
+    #   mqtt_username: "ton_utilisateur_mqtt"
+    #   mqtt_password: "son_mot_de_passe"
+    username: !secret mqtt_username
+    password: !secret mqtt_password
+    discovery: false
+
+globals:
+  # --- Round-robin ---
+  # Index dans SEQ (voir script ci-dessous), 0..8.
+  - id: g_slam_poll_step
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  # true = le round-robin automatique n'envoie plus rien, seul le contenu
+  # de g_pending_cmd (injection manuelle) part encore. Sert aux tests
+  # isolés (cf test_connectivity.sh / TESTING.md). ATTENTION : suspend
+  # aussi la surveillance sécurité automatique - à utiliser robot
+  # immobile/supervisé uniquement.
+  - id: g_slam_poll_paused
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  # --- cmd_vel (Nav2 -> MQTT -> SetMotor) ---
+  - id: g_cmd_linear_x
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: g_cmd_angular_z
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: g_cmd_last_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  # --- Sécurité ---
+  # Flags individuels (mis à jour par gen3.yaml à chaque lecture des
+  # capteurs correspondants), et flag latché global : une fois à true,
+  # g_safety_stop RESTE true - pas de reprise automatique. Il faut
+  # explicitement envoyer "clear" sur mqtt_clean_cmd_topic (voir plus bas)
+  # pour le réarmer, en connaissance de cause.
+  - id: g_safety_bump
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_safety_cliff
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_safety_wheel_extended
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_safety_stop
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  # --- Calibration (réglable à chaud via MQTT, persistée en flash) ---
+  # Voir slam/calibrate.py pour la procédure de mesure. Valeurs initiales
+  # = points de départ arbitraires tant qu'aucune calibration n'a été
+  # faite, cf substitutions ci-dessus. restore_value: true -> survit à un
+  # redémarrage de l'ESP32 sans avoir besoin de renvoyer la valeur après
+  # coup (mais PAS après un reflash complet, qui réinitialise la flash).
+  - id: g_cal_drop_threshold_mm
+    type: float
+    restore_value: true
+    initial_value: '${drop_threshold_mm_default}'
+  # Facteur multiplicatif appliqué à la distance commandée à SetMotor pour
+  # compenser un éventuel écart entre distance demandée et distance
+  # réellement parcourue (glissement de roue, calibration encodeur...).
+  # 1.0 = pas de correction (comportement par défaut avant calibration).
+  - id: g_cal_dist_scale
+    type: float
+    restore_value: true
+    initial_value: '1.0'
+  - id: g_cal_wheel_base_m
+    type: float
+    restore_value: true
+    initial_value: '${wheel_base_m_default}'
+
+  # --- Commande brosse/aspirateur en attente (injection one-shot) ---
+  # Non vide = à envoyer au prochain tour du round-robin, à la place de
+  # la commande normalement prévue à ce pas-là.
+  - id: g_pending_cmd
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+
+# ---- Réception cmd_vel (Nav2, via slam_bridge.py) ----
+text_sensor:
+  - platform: mqtt_subscribe
+    id: cmd_vel_in
+    topic: ${mqtt_cmd_vel_topic}
+    on_value:
+      then:
+        - lambda: |-
+            json::parse_json(x, [](JsonObject root) -> bool {
+              if (!root.containsKey("linear_x") || !root.containsKey("angular_z"))
+                return false;
+              id(g_cmd_linear_x) = root["linear_x"].as<float>();
+              id(g_cmd_angular_z) = root["angular_z"].as<float>();
+              id(g_cmd_last_ms) = millis();
+              return true;
+            });
+
+  # ---- Réception des commandes brosse/aspirateur + reset sécurité + test + calibration ----
+  # Payloads attendus (texte brut, pas de JSON) :
+  #   "clean_on"  -> Clean CleaningEnable  (active brosse+aspirateur)
+  #   "clean_off" -> Clean CleaningDisable
+  #   "clear_safety_stop" -> réarme g_safety_stop après vérification manuelle
+  #   "pause_polling"  -> suspend le round-robin automatique (tests isolés)
+  #   "resume_polling" -> reprend le round-robin automatique normal
+  #   "raw:<commande>" -> envoie <commande> une seule fois (ex: "raw:GetLDSScan")
+  #                       Respecte quand même la file d'attente (n'écrase
+  #                       pas une commande déjà en attente).
+  #   "cal:drop_threshold:<mm>"  -> règle g_cal_drop_threshold_mm
+  #   "cal:dist_scale:<facteur>" -> règle g_cal_dist_scale
+  #   "cal:wheel_base:<m>"       -> règle g_cal_wheel_base_m
+  #   Voir slam/calibrate.py pour la procédure guidée qui mesure et envoie
+  #   ces valeurs plutôt que de les deviner.
+  #
+  # NON VÉRIFIÉ : "Clean CleaningEnable"/"CleaningDisable" viennent de
+  # research/hidden-commands.md (doc, pas de capture réelle comme
+  # GetMotor). A confirmer en TestMode avant de compter dessus pendant un
+  # vrai cycle de nettoyage.
+  - platform: mqtt_subscribe
+    id: clean_cmd_in
+    topic: ${mqtt_clean_cmd_topic}
+    on_value:
+      then:
+        - lambda: |-
+            if (x == "clean_on") {
+              id(g_pending_cmd) = "Clean CleaningEnable \n";
+            } else if (x == "clean_off") {
+              id(g_pending_cmd) = "Clean CleaningDisable \n";
+            } else if (x == "clear_safety_stop") {
+              // Réarmement volontaire seulement - ne jamais faire ça
+              // automatiquement depuis un autre bout de ce fichier.
+              id(g_safety_stop) = false;
+              ESP_LOGW("safety", "g_safety_stop reinitialise manuellement via MQTT");
+            } else if (x == "pause_polling") {
+              id(g_slam_poll_paused) = true;
+              ESP_LOGW("test", "Round-robin en pause (mode test manuel) - securite automatique suspendue !");
+            } else if (x == "resume_polling") {
+              id(g_slam_poll_paused) = false;
+              ESP_LOGW("test", "Round-robin repris");
+            } else if (x.rfind("raw:", 0) == 0) {
+              std::string cmd = x.substr(4) + " \n";
+              id(g_pending_cmd) = cmd;
+              ESP_LOGW("test", "Commande de test en attente: %s", x.substr(4).c_str());
+            } else if (x.rfind("cal:drop_threshold:", 0) == 0) {
+              float v = atof(x.substr(20).c_str());
+              id(g_cal_drop_threshold_mm) = v;
+              ESP_LOGW("cal", "g_cal_drop_threshold_mm = %.1f mm", v);
+            } else if (x.rfind("cal:dist_scale:", 0) == 0) {
+              float v = atof(x.substr(15).c_str());
+              id(g_cal_dist_scale) = v;
+              ESP_LOGW("cal", "g_cal_dist_scale = %.4f", v);
+            } else if (x.rfind("cal:wheel_base:", 0) == 0) {
+              float v = atof(x.substr(15).c_str());
+              id(g_cal_wheel_base_m) = v;
+              ESP_LOGW("cal", "g_cal_wheel_base_m = %.4f m", v);
+            }
+
+script:
+  # mode: single -> si un cycle précédent n'est pas terminé, on saute ce
+  # tour au lieu d'empiler des commandes et de corrompre l'UART.
+  - id: slam_poll_cycle
+    mode: single
+    then:
+      - lambda: |-
+          // Séquence priorisant la sécurité : Digital et Analog reviennent
+          // toutes les 3 étapes chacun (6 pas de sécurité sur 9), les
+          // tâches "normales" (SetMotor, GetMotor, GetLDSScan) se
+          // partagent les 3 pas restants, une fois chacune par cycle.
+          // 0=GetDigitalSensors, 1=GetAnalogSensors, 2=SetMotor,
+          // 3=GetMotor, 4=GetLDSScan
+          static const int SEQ[9] = {0, 1, 2, 0, 1, 3, 0, 1, 4};
+
+          // Mode pause (tests isolés) : on n'envoie QUE une commande de
+          // test en attente, rien d'autre - ni sécurité, ni odométrie,
+          // ni scan. Ne l'utilise que robot immobile/supervisé.
+          if (id(g_slam_poll_paused)) {
+            if (!id(g_pending_cmd).empty()) {
+              id(uart_bus).write_str(id(g_pending_cmd));
+              id(g_pending_cmd) = "";
+            }
+            return;
+          }
+
+          int step = id(g_slam_poll_step);
+          id(g_slam_poll_step) = (step + 1) % 9;
+          int action = SEQ[step];
+
+          // ---- Injection one-shot prioritaire (brosse/aspirateur) ----
+          // Passe devant l'action normalement prévue à ce pas, mais
+          // JAMAIS devant une lecture de sécurité (action 0 ou 1) - la
+          // sécurité ne doit jamais être retardée par une commande de
+          // confort comme activer la brosse.
+          if (!id(g_pending_cmd).empty() && action != 0 && action != 1) {
+            id(uart_bus).write_str(id(g_pending_cmd));
+            id(g_pending_cmd) = "";
+            return;
+          }
+
+          if (action == 0) {
+            id(uart_bus).write_str("GetDigitalSensors \n");
+            return;
+          }
+          if (action == 1) {
+            id(uart_bus).write_str("GetAnalogSensors \n");
+            return;
+          }
+          if (action == 3) {
+            id(uart_bus).write_str("GetMotor \n");
+            return;
+          }
+          if (action == 4) {
+            id(uart_bus).write_str("GetLDSScan \n");
+            return;
+          }
+
+          // action == 2 : SetMotor, traduit depuis le dernier cmd_vel reçu
+          uint32_t now = millis();
+          bool stale = (id(g_cmd_last_ms) == 0) ||
+                       (now - id(g_cmd_last_ms) > ${cmd_vel_stale_timeout});
+
+          // Priorité absolue à l'arrêt d'urgence latché, quel que soit
+          // l'état de cmd_vel.
+          if (id(g_safety_stop) || stale) {
+            id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+            return;
+          }
+
+          float lin = id(g_cmd_linear_x);
+          float ang = id(g_cmd_angular_z);
+
+          if (fabsf(lin) < 0.005f && fabsf(ang) < 0.01f) {
+            id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+            return;
+          }
+
+          float wheel_base = id(g_cal_wheel_base_m);
+          float v_left  = lin - ang * wheel_base / 2.0f;
+          float v_right = lin + ang * wheel_base / 2.0f;
+
+          float lookahead = ${setmotor_lookahead_s};
+          float dist_scale = id(g_cal_dist_scale);
+          long dist_left_mm  = (long)(v_left  * lookahead * 1000.0f * dist_scale);
+          long dist_right_mm = (long)(v_right * lookahead * 1000.0f * dist_scale);
+
+          float speed = fmaxf(fabsf(v_left), fabsf(v_right)) * 1000.0f;
+          float max_speed = ${setmotor_max_speed};
+          if (speed > max_speed) speed = max_speed;
+          if (speed < 10.0f) speed = 10.0f;
+
+          char cmd[96];
+          int len = snprintf(cmd, sizeof(cmd),
+                              "SetMotor RWheelDist %ld LWheelDist %ld Speed %d \n",
+                              dist_right_mm, dist_left_mm, (int) speed);
+          if (len > 0 && len < (int) sizeof(cmd)) {
+            id(uart_bus).write_str(std::string(cmd, len));
+          }
+
+interval:
+  - interval: ${slam_poll_interval}
+    then:
+      - script.execute: slam_poll_cycle
