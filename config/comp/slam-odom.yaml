@@ -34,6 +34,18 @@ substitutions:
   # slam/.env (côté conteneur Docker).
   mqtt_broker: "192.168.10.108"
   mqtt_port: "1883"
+  # Valeurs vides par défaut - un paquet distant (remote_package_files)
+  # ne peut PAS utiliser !secret directement (limitation documentée
+  # d'ESPHome). C'est ton fichier YAML LOCAL sur HA qui doit fournir les
+  # vraies valeurs, via ses propres substitutions :
+  #   substitutions:
+  #     ...
+  #     mqtt_username: !secret mqtt_username
+  #     mqtt_password: !secret mqtt_password
+  # (ESPHome fusionne les substitutions entre le fichier local et les
+  # paquets distants, le local a priorité sur ce défaut vide.)
+  mqtt_username: ""
+  mqtt_password: ""
   mqtt_wheels_topic: "neato/robot/wheels"
   mqtt_scan_topic: "neato/robot/scan"
   mqtt_safety_topic: "neato/robot/safety"
@@ -80,8 +92,8 @@ mqtt:
   # ça). Ajoute ces deux clés dans ton secrets.yaml ESPHome :
   #   mqtt_username: "ton_utilisateur_mqtt"
   #   mqtt_password: "son_mot_de_passe"
-  username: !secret mqtt_username
-  password: !secret mqtt_password
+  username: ${mqtt_username}
+  password: ${mqtt_password}
   discovery: false
 
 globals:
