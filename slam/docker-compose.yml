@@ -26,6 +26,14 @@ services:
         - ROSBRIDGE_PORT=${ROSBRIDGE_PORT:-2002}
         - WS_IN_PORT=${WS_IN_PORT:-2003}
         - ROBOT_TYPE=${ROBOT_TYPE:-d7_gen3}
+        # BUGFIX: ces variables existaient dans entrypoint.sh/.env.example
+        # mais n'étaient jamais transmises au conteneur - NAV2_ENABLED=true
+        # dans .env n'avait donc AUCUN effet avant ce correctif.
+        - NAV2_ENABLED=${NAV2_ENABLED:-false}
+        - CMD_VEL_OUT_TOPIC=${CMD_VEL_OUT_TOPIC:-neato/robot/cmd_vel_out}
+        - MQTT_CLEAN_CMD_TOPIC=${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}
+        - ROBOT_RADIUS_M=${ROBOT_RADIUS_M:-0.20}
+        - ROW_SPACING_M=${ROW_SPACING_M:-0.32}
     volumes:
         - ./maps:/app/maps
         - ./logs:/app/logs
