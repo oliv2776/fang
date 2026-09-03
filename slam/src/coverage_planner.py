@@ -55,11 +55,12 @@ class CoveragePlanner(Node):
     def __init__(self):
         super().__init__('coverage_planner')
 
-        self.robot_radius_m = float(self.declare_parameter('robot_radius_m', 0.20).value)
-        # Espacement entre deux lignes de balayage. ~1.6x le rayon robot
-        # donne un léger recouvrement pour ne pas laisser de bandes non
-        # couvertes entre deux passages.
-        self.row_spacing_m = float(self.declare_parameter('row_spacing_m', 0.32).value)
+        self.robot_radius_m = float(self.declare_parameter('robot_radius_m', 0.168).value)
+        # Espacement entre deux lignes de balayage = largeur mesurée de la
+        # brosse centrale (27.5cm) x 0.85 pour un recouvrement de 15%
+        # (compense l'imprécision de l'odométrie/du suivi de trajectoire,
+        # évite les bandes non nettoyées entre deux passages).
+        self.row_spacing_m = float(self.declare_parameter('row_spacing_m', 0.234).value)
         self.min_segment_m = float(self.declare_parameter('min_segment_m', 0.25).value)
 
         # --- Replanification incrémentale pendant le nettoyage ---
@@ -104,11 +105,27 @@ class CoveragePlanner(Node):
         self._explore_goal_handle = None
         self._current_explore_target = None
 
+        # --- Retour au socle ---
+        # ⚠️ Ce n'est PAS le retour au socle natif du Neato (qui utilise la
+        # balise infrarouge du socle pour un alignement précis sur les
+        # contacts de charge, intégré à son mode "House" natif). Ici, on
+        # navigue juste jusqu'à la position enregistrée comme "départ" via
+        # Nav2/SLAM - ça amène le robot PRÈS du socle, mais rien ne garantit
+        # un alignement assez précis pour recharger réellement. À valider
+        # au premier essai, robot supervisé.
+        self._home_pose = None  # (x, y, theta), capturé automatiquement au 1er TF valide
+        self._home_captured = False
+        self._docking = False
+        self._dock_goal_handle = None
+        self.create_timer(1.0, self._maybe_capture_home_pose)
+
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
         self.create_subscription(Bool, '/safety_stop', self._on_safety_stop, 10)
         self.create_subscription(Bool, '/start_cleaning', self._on_start_cleaning, 10)
         self.create_subscription(Bool, '/start_scan', self._on_start_scan, 10)
         self.create_subscription(Bool, '/start_explore', self._on_start_explore, 10)
+        self.create_subscription(Bool, '/return_to_dock', self._on_return_to_dock, 10)
+        self.create_subscription(Bool, '/set_home_position', self._on_set_home_position, 10)
         self.create_subscription(String, '/clean_zone_request', self._on_zone_request, 10)
 
         self._waypoints_client = ActionClient(self, FollowWaypoints, 'follow_waypoints')
@@ -218,7 +235,7 @@ class CoveragePlanner(Node):
             self._stop_exploration()
 
     def _start_exploration(self):
-        if self._running or self._exploring:
+        if self._running or self._exploring or self._docking:
             self.get_logger().warn("Un cycle est déjà en cours, ignoré")
             return
         self._exploring = True
@@ -238,11 +255,124 @@ class CoveragePlanner(Node):
         self.get_logger().info("Exploration arrêtée")
 
     def _get_robot_pose(self):
+        """Renvoie (x, y, theta) en repère 'map', ou None si la TF n'est
+        pas encore disponible."""
         try:
             t = self.tf_buffer.lookup_transform('map', 'base_link', Time())
-            return t.transform.translation.x, t.transform.translation.y
+            q = t.transform.rotation
+            theta = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+            return t.transform.translation.x, t.transform.translation.y, theta
         except (LookupException, ConnectivityException, ExtrapolationException):
             return None
+
+    def _maybe_capture_home_pose(self):
+        """Capture la position de départ UNE SEULE FOIS, à la première TF
+        disponible après le démarrage - suppose que le robot est posé sur
+        son socle au lancement du conteneur. Si ce n'est pas le cas,
+        utilise /api/dock/set_home pour redéfinir la position manuellement."""
+        if self._home_captured:
+            return
+        pose = self._get_robot_pose()
+        if pose is None:
+            return
+        self._home_pose = pose
+        self._home_captured = True
+        self.get_logger().info(
+            f"Position de départ capturée automatiquement : "
+            f"({pose[0]:.2f}, {pose[1]:.2f}, {math.degrees(pose[2]):.0f}°). "
+            f"Si le robot n'était pas sur son socle à cet instant, "
+            f"utilise /api/dock/set_home pour corriger."
+        )
+
+    def _on_set_home_position(self, msg: Bool):
+        """Redéfinit manuellement la position 'socle' à la position
+        actuelle du robot (ex: après l'avoir replacé toi-même dessus)."""
+        if not msg.data:
+            return
+        pose = self._get_robot_pose()
+        if pose is None:
+            self.get_logger().error("Pose robot indisponible (TF), impossible de redéfinir le socle")
+            return
+        self._home_pose = pose
+        self._home_captured = True
+        self.get_logger().info(
+            f"Position du socle redéfinie manuellement : ({pose[0]:.2f}, {pose[1]:.2f})"
+        )
+
+    def _on_return_to_dock(self, msg: Bool):
+        if not msg.data:
+            self._abort_docking()
+            return
+        if self._running or self._exploring or self._docking:
+            self.get_logger().warn("Un cycle est déjà en cours, ignoré")
+            return
+        if self._safety_stop:
+            self.get_logger().error(
+                "Retour au socle refusé : safety_stop actif. Vérifie le robot et "
+                "réarme-le avant de relancer."
+            )
+            return
+        if self._home_pose is None:
+            self.get_logger().error(
+                "Position du socle inconnue (aucune TF capturée depuis le "
+                "démarrage) - utilise /api/dock/set_home une fois le robot "
+                "posé sur son socle."
+            )
+            return
+
+        if not self._nav_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().error("Action navigate_to_pose indisponible (Nav2 lancé ?)")
+            return
+
+        x, y, theta = self._home_pose
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.pose.position.x = x
+        goal.pose.pose.position.y = y
+        goal.pose.pose.orientation.z = math.sin(theta / 2.0)
+        goal.pose.pose.orientation.w = math.cos(theta / 2.0)
+
+        self._docking = True
+        self.get_logger().info(
+            f"Retour au socle : navigation vers ({x:.2f}, {y:.2f}) - "
+            f"approximatif, ne garantit pas un alignement de charge précis."
+        )
+
+        send_future = self._nav_client.send_goal_async(goal)
+        send_future.add_done_callback(self._on_dock_goal_response)
+
+    def _on_dock_goal_response(self, future):
+        if not self._docking:
+            return
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error("Objectif de retour au socle refusé par Nav2")
+            self._docking = False
+            return
+        self._dock_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_dock_result)
+
+    def _on_dock_result(self, future):
+        self._dock_goal_handle = None
+        self._docking = False
+        try:
+            future.result()
+            self.get_logger().info(
+                "Retour au socle terminé - vérifie visuellement que le "
+                "robot est bien en charge, l'alignement précis n'est pas garanti."
+            )
+        except Exception as e:
+            self.get_logger().warn(f"Retour au socle échoué/annulé: {e}")
+
+    def _abort_docking(self):
+        self._docking = False
+        if self._dock_goal_handle is not None:
+            try:
+                self._dock_goal_handle.cancel_goal_async()
+            except Exception as e:
+                self.get_logger().warn(f"Échec annulation retour au socle: {e}")
+        self._dock_goal_handle = None
 
     def _is_blacklisted(self, frontier, radius_m=0.5):
         for b in self._explore_blacklist:
@@ -308,7 +438,7 @@ class CoveragePlanner(Node):
             threading.Timer(2.0, self._exploration_step).start()
             return
 
-        rx, ry = pose
+        rx, ry, _rtheta = pose
         frontiers.sort(key=lambda f: (f["x"] - rx) ** 2 + (f["y"] - ry) ** 2)
         target = frontiers[0]
         self._current_explore_target = target
@@ -445,7 +575,7 @@ class CoveragePlanner(Node):
 
     # ------------------------------------------------------------- Cycle nettoyage
     def _start_cleaning(self, polygon=None, scan_only=False):
-        if self._running:
+        if self._running or self._exploring or self._docking:
             self.get_logger().warn("Un cycle est déjà en cours, ignoré")
             return
 
