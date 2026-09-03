@@ -3,7 +3,7 @@
 # Adapté pour Neato D7 gen3 avec LiDAR 360°
 # Base : Ubuntu 22.04 (jammy)
 
-FROM ros:humble-ros-base-ubuntu-jammy
+FROM ros:humble-ros-base-jammy
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV ROS_DOMAIN_ID=0
