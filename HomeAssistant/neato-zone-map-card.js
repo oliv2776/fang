@@ -83,6 +83,7 @@ class NeatoZoneMapCard extends HTMLElement {
           <button id="btnCleanZone" disabled>Nettoyer cette zone</button>
           <button id="btnCleanAll" class="secondary">Nettoyer tout</button>
           <button id="btnStop" class="secondary">Arrêter</button>
+          <button id="btnDiagnose" class="secondary">Lancer le diagnostic</button>
         </div>
         <canvas id="mapCanvas" width="600" height="600"></canvas>
         <div class="status" id="statusText">Chargement de la carte...</div>
@@ -101,6 +102,7 @@ class NeatoZoneMapCard extends HTMLElement {
     this.shadowRoot.getElementById('btnCleanZone').addEventListener('click', () => this._sendZone());
     this.shadowRoot.getElementById('btnCleanAll').addEventListener('click', () => this._cleanAll());
     this.shadowRoot.getElementById('btnStop').addEventListener('click', () => this._stopCleaning());
+    this.shadowRoot.getElementById('btnDiagnose').addEventListener('click', () => this._runDiagnose());
 
     this._fetchMap();
     this._fetchSafety();
@@ -182,6 +184,40 @@ class NeatoZoneMapCard extends HTMLElement {
       this._setStatus('Arrêt demandé');
     } catch (e) {
       this._setStatus(`Erreur d'envoi: ${e.message}`);
+    }
+  }
+
+  async _runDiagnose() {
+    // ~15s bloquant côté conteneur (4 commandes de lecture, PAS de
+    // mouvement - SetMotor n'est jamais testé depuis ce bouton).
+    const btn = this.shadowRoot.getElementById('btnDiagnose');
+    btn.disabled = true;
+    this._setStatus('Diagnostic en cours (~15s, aucun mouvement du robot)...');
+    try {
+      const res = await fetch(`${this._apiBase}/api/diagnose/run`, { method: 'POST' });
+      if (!res.ok) {
+        this._setStatus(`Erreur diagnostic: HTTP ${res.status}`);
+        return;
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^"]+)"?/);
+      const filename = match ? match[1] : 'diagnostic_neato.md';
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      this._setStatus(`Rapport téléchargé: ${filename}`);
+    } catch (e) {
+      this._setStatus(`Erreur diagnostic: ${e.message}`);
+    } finally {
+      btn.disabled = false;
     }
   }
 
