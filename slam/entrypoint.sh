@@ -26,6 +26,10 @@ mkdir -p /app/maps /app/logs
 # Sourcing ROS2
 source /opt/ros/humble/setup.bash
 
+# Fichier de config slam_toolbox (frames odom/map/base_link, scan_topic, etc.)
+# BUGFIX: ce fichier n'était jamais passé à slam_toolbox -> params par défaut du package
+SLAM_PARAMS_FILE="/app/config/slam_toolbox.yaml"
+
 # --- 1. robot_state_publisher (TF base_link -> laser_link) ---
 ros2 run robot_state_publisher robot_state_publisher \
         --ros-args --params-file /app/config/rsp_params.yaml \
@@ -44,9 +48,11 @@ echo "[OK] ekf_node (PID=$EKF_PID)"
 SLAM_MODE="${SLAM_MODE:-mapping}"
 if [ "$SLAM_MODE" = "localize" ]; then
     ros2 launch slam_toolbox online_localization_launch.py \
+            slam_params_file:="${SLAM_PARAMS_FILE}" \
             > /app/logs/slam_toolbox.log 2>&1 &
 else
     ros2 launch slam_toolbox online_async_launch.py \
+            slam_params_file:="${SLAM_PARAMS_FILE}" \
             > /app/logs/slam_toolbox.log 2>&1 &
 fi
 SLAM_PID=$!
@@ -124,9 +130,11 @@ while true; do
         echo "[WARN] slam_toolbox mort, relance..."
         if [ "$SLAM_MODE" = "localize" ]; then
             ros2 launch slam_toolbox online_localization_launch.py \
+                    slam_params_file:="${SLAM_PARAMS_FILE}" \
                     > /app/logs/slam_toolbox.log 2>&1 &
         else
             ros2 launch slam_toolbox online_async_launch.py \
+                    slam_params_file:="${SLAM_PARAMS_FILE}" \
                     > /app/logs/slam_toolbox.log 2>&1 &
         fi
         SLAM_PID=$!
