@@ -1,22 +1,24 @@
 #!/bin/bash
 # Script de test de connectivité pour le Neato D7 gen3
 # À exécuter sur le serveur Ubuntu AVANT de lancer le container SLAM
-# Usage : ./test_connectivity.sh [IP_ROBOT] [PORT_MQTT]
+# Usage : ./test_connectivity.sh [IP_ROBOT] [IP_BROKER_MQTT] [PORT_MQTT] [PORT_REST]
 
 ROBOT_IP="${1:-192.168.10.126}"
-MQTT_PORT="${2:-1883}"
-REST_PORT="${3:-2000}"
+MQTT_BROKER_IP="${2:-192.168.10.108}"
+MQTT_PORT="${3:-1883}"
+REST_PORT="${4:-2000}"
 
 echo "=========================================="
 echo "  Test de connectivité - Neato D7 gen3"
-echo "  IP robot/ESP32 : $ROBOT_IP"
-echo "  Port MQTT        : $MQTT_PORT"
-echo "  Port REST        : $REST_PORT"
+echo "  IP robot/ESP32     : $ROBOT_IP"
+echo "  IP broker MQTT (HA): $MQTT_BROKER_IP"
+echo "  Port MQTT          : $MQTT_PORT"
+echo "  Port REST          : $REST_PORT"
 echo "=========================================="
 
-# --- 1. Ping ---
+# --- 1. Ping du robot ---
 echo ""
-echo "[1/5] Ping $ROBOT_IP ..."
+echo "[1/5] Ping $ROBOT_IP (robot/ESP32) ..."
 if ping -c 3 -W 2 "$ROBOT_IP" > /dev/null 2>&1; then
     echo "    [OK] $ROBOT_IP répond au ping"
 else
@@ -25,28 +27,27 @@ else
     exit 1
 fi
 
-# --- 2. Port MQTT ---
+# --- 2. Port MQTT (sur le broker, PAS sur le robot) ---
 echo ""
-echo "[2/5] Test port MQTT $ROBOT_IP:$MQTT_PORT ..."
+echo "[2/5] Test port MQTT $MQTT_BROKER_IP:$MQTT_PORT (broker, ex: HA) ..."
 if command -v nc > /dev/null 2>&1; then
-    if nc -z -w 3 "$ROBOT_IP" "$MQTT_PORT" 2>/dev/null; then
-        echo "    [OK] Port MQTT $MQTT_PORT ouvert"
+    if nc -z -w 3 "$MQTT_BROKER_IP" "$MQTT_PORT" 2>/dev/null; then
+        echo "    [OK] Port MQTT $MQTT_PORT ouvert sur $MQTT_BROKER_IP"
     else
-        echo "    [FAIL] Port MQTT $MQTT_PORT fermé"
-        echo "    -> Vérifier que le broker MQTT tourne sur l'ESP32 ou le serveur"
-        echo "    -> Si le broker est sur le serveur, décommenter le service 'mqtt' dans docker-compose.yml"
+        echo "    [FAIL] Port MQTT $MQTT_PORT fermé sur $MQTT_BROKER_IP"
+        echo "    -> Vérifier que le broker MQTT (ex: add-on Mosquitto de HA) tourne bien à cette IP"
         exit 1
     fi
 else
     echo "    [SKIP] 'nc' non installé, on passe"
 fi
 
-# --- 3. Test MQTT avec mosquitto_sub ---
+# --- 3. Test MQTT avec mosquitto_sub (sur le broker) ---
 echo ""
-echo "[3/5] Test abonnement MQTT (5s) ..."
+echo "[3/5] Test abonnement MQTT sur $MQTT_BROKER_IP (5s) ..."
 if command -v mosquitto_sub > /dev/null 2>&1; then
     echo "  Écoute neato/robot/# pendant 5s..."
-    timeout 5 mosquitto_sub -h "$ROBOT_IP" -p "$MQTT_PORT" -t "neato/robot/#" -v 2>/dev/null
+    timeout 5 mosquitto_sub -h "$MQTT_BROKER_IP" -p "$MQTT_PORT" -t "neato/robot/#" -v 2>/dev/null
     RC=$?
     if [ $RC -eq 124 ]; then
         echo "    [OK] mosquitto_sub a tourné 5s (aucun message reçu, normal si robot idle)"
@@ -54,7 +55,7 @@ if command -v mosquitto_sub > /dev/null 2>&1; then
         echo "    [OK] Messages MQTT reçus"
     else
         echo "    [FAIL] mosquitto_sub a échoué (code $RC)"
-        echo "    -> Vérifier que le broker MQTT est accessible"
+        echo "    -> Vérifier que le broker MQTT est accessible à $MQTT_BROKER_IP"
         exit 1
     fi
 else
