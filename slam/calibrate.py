@@ -71,18 +71,23 @@ def read_env_default(key: str, fallback: str) -> str:
 
 
 class Calibrator:
-    def __init__(self, broker, port, prefix):
+    def __init__(self, broker, port, prefix, username="", password=""):
         self.prefix = prefix
         self._last_safety = None
         self._last_wheels = None
 
         self.client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
+        if username:
+            self.client.username_pw_set(username, password)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
         self.client.connect(broker, port, keepalive=30)
         self.client.loop_start()
 
     def _on_connect(self, client, userdata, flags, rc):
+        if rc == 5:
+            print(err("Échec de connexion MQTT : accès refusé (rc=5) - "
+                       "vérifie --username/--password ou MQTT_USERNAME/MQTT_PASSWORD dans .env"))
         if rc == 0:
             client.subscribe(f"{self.prefix}/#", qos=1)
 
@@ -347,9 +352,11 @@ def main():
     parser.add_argument("--prefix", default=read_env_default("MQTT_PREFIX", "neato/robot"))
     parser.add_argument("--skip-wheel-base", action="store_true",
                          help="Ne propose même pas l'étape 3 (expérimentale)")
+    parser.add_argument("--username", default=read_env_default("MQTT_USERNAME", ""))
+    parser.add_argument("--password", default=read_env_default("MQTT_PASSWORD", ""))
     args = parser.parse_args()
 
-    cal = Calibrator(args.broker, args.port, args.prefix)
+    cal = Calibrator(args.broker, args.port, args.prefix, args.username, args.password)
     time.sleep(1.5)
 
     try:
