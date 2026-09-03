@@ -33,9 +33,26 @@ SLAM_PARAMS_FILE="/app/config/slam_toolbox.yaml"
 # Fichier de config Nav2 (costmaps, controller, planner...)
 NAV2_PARAMS_FILE="/app/config/nav2_params.yaml"
 
+python3 - <<'PY'
+from pathlib import Path
+
+urdf = Path("/app/config/robot.urdf").read_text()
+
+lines = [
+    "robot_state_publisher:",
+    "  ros__parameters:",
+    "    robot_description: |",
+]
+
+for line in urdf.splitlines():
+    lines.append("      " + line)
+
+Path("/tmp/rsp_runtime.yaml").write_text("\n".join(lines) + "\n")
+PY
+
 # --- 1. robot_state_publisher (TF base_link -> laser_link) ---
 ros2 run robot_state_publisher robot_state_publisher \
-        --ros-args --params-file /app/config/rsp_params.yaml \
+        --ros-args --params-file /tmp/rsp_runtime.yaml \
         > /app/logs/rsp.log 2>&1 &
 RSP_PID=$!
 echo "[OK] robot_state_publisher (PID=$RSP_PID)"
@@ -140,10 +157,10 @@ SERVER_PID=$!
 echo "[OK] slam_server (PID=$SERVER_PID)"
 
 # --- 6. rosbridge_server (WebSocket ROS2 -> JSON pour le front) ---
-ros2 run rosbridge_server rosbridge_websocket \
-        --ros-args -p port:="${ROSBRIDGE_PORT:-2002}" \
-        > /app/logs/rosbridge.log 2>&1 &
-ROSBRIDGE_PID=$!
+ros2 run robot_state_publisher robot_state_publisher \
+        --ros-args --params-file /tmp/rsp_runtime.yaml \
+        > /app/logs/rsp.log 2>&1 &
+RSP_PID=$!
 echo "[OK] rosbridge_server (PID=$ROSBRIDGE_PID)"
 
 echo ""
