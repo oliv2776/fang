@@ -84,13 +84,15 @@ def read_env_default(key: str, fallback: str) -> str:
 
 
 class Diagnostics:
-    def __init__(self, broker, port, prefix):
+    def __init__(self, broker, port, prefix, username="", password=""):
         self.broker = broker
         self.port = port
         self.prefix = prefix
         self._last_wheels = None
 
         self.client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
+        if username:
+            self.client.username_pw_set(username, password)
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
 
@@ -100,6 +102,10 @@ class Diagnostics:
         self.client.loop_start()
 
     def _on_connect(self, client, userdata, flags, rc):
+        if rc == 5:
+            print(err(f"[{ts()}] Échec de connexion MQTT : accès refusé (rc=5) - "
+                       f"vérifie --username/--password ou MQTT_USERNAME/MQTT_PASSWORD dans .env"))
+            return
         if rc != 0:
             print(err(f"[{ts()}] Échec de connexion MQTT (code {rc})"))
             return
@@ -249,9 +255,11 @@ def main():
     parser.add_argument("--prefix", default=read_env_default("MQTT_PREFIX", "neato/robot"),
                          help="Doit matcher MQTT_PREFIX")
     parser.add_argument("--guided", action="store_true", help="Lance le mode test guidé (commande par commande)")
+    parser.add_argument("--username", default=read_env_default("MQTT_USERNAME", ""))
+    parser.add_argument("--password", default=read_env_default("MQTT_PASSWORD", ""))
     args = parser.parse_args()
 
-    diag = Diagnostics(args.broker, args.port, args.prefix)
+    diag = Diagnostics(args.broker, args.port, args.prefix, args.username, args.password)
     diag.connect()
     time.sleep(1.5)  # laisse le temps à la connexion/abonnement de se faire
 
