@@ -38,7 +38,8 @@ COMMANDS = ["GetMotor", "GetDigitalSensors", "GetAnalogSensors", "GetLDSScan"]
 WAIT_PER_COMMAND_S = 3.0
 
 
-def run_diagnostics(mqtt_broker: str, mqtt_port: int, mqtt_prefix: str) -> dict:
+def run_diagnostics(mqtt_broker: str, mqtt_port: int, mqtt_prefix: str,
+                     mqtt_username: str = "", mqtt_password: str = "") -> dict:
     """Exécute la séquence de diagnostic complète et renvoie un rapport
     (dict, sérialisable en JSON). Bloquant pendant environ
     len(COMMANDS) * WAIT_PER_COMMAND_S secondes + connexion."""
@@ -48,11 +49,14 @@ def run_diagnostics(mqtt_broker: str, mqtt_port: int, mqtt_prefix: str) -> dict:
     captured = {cmd: [] for cmd in COMMANDS}
     captured_lock = threading.Lock()
     connected = threading.Event()
+    report_errors_holder = {"auth_failed": False}
 
     def on_connect(client, userdata, flags, rc):
         if rc == 0:
             client.subscribe(f"{mqtt_prefix}/#", qos=1)
             connected.set()
+        elif rc == 5:
+            report_errors_holder["auth_failed"] = True
 
     def on_message(client, userdata, msg):
         # On route chaque message vers la commande actuellement testée,
@@ -71,6 +75,8 @@ def run_diagnostics(mqtt_broker: str, mqtt_port: int, mqtt_prefix: str) -> dict:
 
     state = {'current_cmd': None}
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1, userdata=state)
+    if mqtt_username:
+        client.username_pw_set(mqtt_username, mqtt_password)
     client.on_connect = on_connect
     client.on_message = on_message
 
@@ -87,7 +93,13 @@ def run_diagnostics(mqtt_broker: str, mqtt_port: int, mqtt_prefix: str) -> dict:
         client.loop_start()
 
         if not connected.wait(timeout=5.0):
-            report["errors"].append("Connexion MQTT impossible (timeout 5s)")
+            if report_errors_holder["auth_failed"]:
+                report["errors"].append(
+                    "Connexion MQTT refusée (rc=5, accès non autorisé) - "
+                    "vérifie mqtt_username/mqtt_password"
+                )
+            else:
+                report["errors"].append("Connexion MQTT impossible (timeout 5s)")
             return _finalize(report)
 
         cmd_topic = f"{mqtt_prefix}/clean_cmd"
