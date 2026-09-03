@@ -1,34 +1,33 @@
 # config/comp/slam-odom.yaml
 #
-# À inclure dans config/local.yaml (section "packages:") pour activer :
-#   1. La publication MQTT de l'odométrie et du scan LiDAR consommées par
-#      slam_bridge.py côté conteneur Docker (voir config/comp/gen3.yaml
-#      pour le parsing GetMotor/GetLDSScan lui-même).
-#   2. La RÉCEPTION des commandes de vitesse produites par Nav2 (via MQTT,
-#      republiées par slam_bridge.py depuis le topic ROS2 /cmd_vel) et leur
-#      traduction en commandes SetMotor envoyées au Neato.
+# À inclure dans config/local.yaml (section "packages:").
 #
-# HARDWARE CONFIRMÉ : un seul fil vers l'ESP32 (le port debug principal),
-# pas de second fil dédié au module LDS. GetMotor, GetLDSScan ET
-# maintenant SetMotor doivent tous les trois se PARTAGER le même bus UART
-# - le script ci-dessous les envoie en STRICTE ALTERNANCE (jamais deux en
-# même temps), sur 3 tours au lieu de 2 précédemment.
+# Le parsing des réponses UART (GetMotor, GetLDSScan, GetDigitalSensors,
+# GetAnalogSensors) est fait dans config/comp/gen3.yaml, dans le même
+# parseur que GetCharger/GetState/etc. Ce fichier ajoute :
+#   1. Le composant mqtt: (broker) nécessaire aux publish
+#   2. Le round-robin d'envoi des commandes sur l'unique fil UART partagé
+#   3. La réception cmd_vel (Nav2 -> MQTT -> SetMotor)
+#   4. La réception des commandes brosse/aspirateur (Clean CleaningEnable/Disable)
 #
-# ⚠️ SÉCURITÉ - LIS CECI AVANT DE TESTER SetMotor SUR LE ROBOT :
-# La traduction cmd_vel -> SetMotor ci-dessous (calcul des distances par
-# roue, valeur de "Speed") est une hypothèse NON VÉRIFIÉE sur un vrai
-# robot, au même titre que le format GetLDSScan - mais ici les conséquences
-# d'une hypothèse fausse sont physiques (le robot part dans une direction
-# inattendue), pas juste une carte incohérente. Reste à portée de main du
-# bouton d'arrêt/de la prise du robot lors des premiers tests. Le calcul
-# suppose aussi que SetMotor accepte des distances négatives pour la
-# marche arrière - non confirmé, à vérifier en TestMode avant de faire
-# confiance à Nav2 pour du recul.
+# ⚠️ SÉCURITÉ - ARCHITECTURE DE CE FICHIER :
+# GetDigitalSensors (chocs, roue soulevée) et GetAnalogSensors (détection
+# de vide/chute) sont maintenant vérifiés BEAUCOUP plus souvent que le
+# reste (2 tours sur 9 chacun, contre 1 seul pour GetMotor/GetLDSScan/
+# SetMotor) - la séquence ci-dessous alterne volontairement sécurité et
+# tâches normales à chaque pas. Dès qu'un choc, une roue soulevée ou un
+# vide est détecté, gen3.yaml envoie un SetMotor d'arrêt IMMÉDIATEMENT
+# (sans attendre son tour dans le round-robin) et pose g_safety_stop à
+# true, qui reste vrai tant que rien ne le réinitialise explicitement
+# (voir g_safety_stop plus bas - PAS de reprise automatique).
 #
-# Si aucune commande cmd_vel fraîche n'arrive depuis plus de
-# cmd_vel_stale_timeout, le robot s'arrête automatiquement (SetMotor
-# LWheelDisable RWheelDisable) - protection contre une coupure réseau/MQTT/
-# Docker pendant que le robot roule.
+# Ceci dit, cette architecture reste fondamentalement une architecture de
+# POLLING sur un fil unique, pas un capteur temps réel. Entre deux
+# vérifications sécurité (environ 1x/seconde avec les réglages par
+# défaut), le robot peut avancer un peu "à l'aveugle". Les vitesses dans
+# nav2_params.yaml et le lookahead SetMotor ci-dessous sont volontairement
+# très bas pour limiter la distance parcourue dans cette fenêtre aveugle -
+# NE LES AUGMENTE PAS sans essais progressifs et supervision physique.
 
 substitutions:
   # Doivent correspondre à MQTT_BROKER / MQTT_PORT / MQTT_PREFIX dans
@@ -37,30 +36,30 @@ substitutions:
   mqtt_port: "1883"
   mqtt_wheels_topic: "neato/robot/wheels"
   mqtt_scan_topic: "neato/robot/scan"
-  # Doit correspondre à CMD_VEL_OUT_TOPIC dans slam/.env (défaut aligné).
+  mqtt_safety_topic: "neato/robot/safety"
+  # Doit correspondre à CMD_VEL_OUT_TOPIC dans slam/.env.
   mqtt_cmd_vel_topic: "neato/robot/cmd_vel_out"
+  # Commandes ponctuelles brosse/aspirateur, publiées par le conteneur
+  # Docker (coverage_planner.py) au début/à la fin d'un cycle de nettoyage.
+  mqtt_clean_cmd_topic: "neato/robot/clean_cmd"
 
-  # Intervalle entre CHAQUE envoi (GetMotor, GetLDSScan, SetMotor tournent
-  # à tour de rôle, donc un cycle complet des trois = 3x cette valeur).
-  # À ajuster à la hausse si les logs montrent des réponses tronquées.
-  slam_poll_interval: 800ms
+  # Intervalle entre CHAQUE pas du round-robin (9 pas au total par cycle
+  # complet, voir la séquence dans le script ci-dessous).
+  slam_poll_interval: 500ms
 
-  # Si aucun message cmd_vel_out reçu depuis plus longtemps que ça,
-  # on considère la commande périmée et on arrête le robot par sécurité.
+  # Si aucun cmd_vel_out frais depuis plus longtemps que ça, arrêt auto.
   cmd_vel_stale_timeout: 2500ms
 
-  # Distance d'anticipation utilisée pour convertir une vitesse (m/s) en
-  # distance de roue (mm) à donner à SetMotor : on vise "assez pour tenir
-  # jusqu'au prochain tour de SetMotor" (~3x slam_poll_interval) avec de
-  # la marge, plutôt qu'une commande qui s'arrête juste avant la suivante.
-  setmotor_lookahead_s: "3.5"
+  # Anticipation (secondes) utilisée pour convertir une vitesse en
+  # distance de roue pour SetMotor. Doit couvrir au moins un cycle complet
+  # du round-robin (9 x slam_poll_interval = 4.5s par défaut) + marge.
+  setmotor_lookahead_s: "5.0"
 
-  # Empattement roue gauche/roue droite, en mètres - DOIT rester cohérent
-  # avec wheel_base_m dans slam_bridge.py (même valeur des deux côtés).
+  # DOIT rester cohérent avec wheel_base_m dans slam_bridge.py.
   wheel_base_m: "0.248"
 
-  # Vitesse max envoyée à SetMotor, en mm/s - unité non confirmée (voir
-  # avertissement en tête de fichier), gardée volontairement basse.
+  # Vitesse max envoyée à SetMotor, en mm/s - unité non confirmée, gardée
+  # volontairement basse (voir avertissement dans le Dockerfile/README).
   setmotor_max_speed: "80"
 
 mqtt:
@@ -70,15 +69,17 @@ mqtt:
     # Décommenter et utiliser !secret si ton broker demande une auth :
     # username: !secret mqtt_username
     # password: !secret mqtt_password
-    discovery: false  # on ne veut pas polluer Home Assistant avec ce broker
+    discovery: false
 
 globals:
-  # 0 = GetMotor, 1 = GetLDSScan, 2 = SetMotor (round-robin 3 temps)
+  # --- Round-robin ---
+  # Index dans SEQ (voir script ci-dessous), 0..8.
   - id: g_slam_poll_step
     type: int
     restore_value: false
     initial_value: '0'
 
+  # --- cmd_vel (Nav2 -> MQTT -> SetMotor) ---
   - id: g_cmd_linear_x
     type: float
     restore_value: false
@@ -87,13 +88,43 @@ globals:
     type: float
     restore_value: false
     initial_value: '0.0'
-  # Timestamp (millis) du dernier cmd_vel_out reçu. 0 = jamais reçu.
   - id: g_cmd_last_ms
     type: uint32_t
     restore_value: false
     initial_value: '0'
 
-# ---- Réception des commandes de vitesse Nav2 (via MQTT, JSON) ----
+  # --- Sécurité ---
+  # Flags individuels (mis à jour par gen3.yaml à chaque lecture des
+  # capteurs correspondants), et flag latché global : une fois à true,
+  # g_safety_stop RESTE true - pas de reprise automatique. Il faut
+  # explicitement envoyer "clear" sur mqtt_clean_cmd_topic (voir plus bas)
+  # pour le réarmer, en connaissance de cause.
+  - id: g_safety_bump
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_safety_cliff
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_safety_wheel_extended
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_safety_stop
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
+  # --- Commande brosse/aspirateur en attente (injection one-shot) ---
+  # Non vide = à envoyer au prochain tour du round-robin, à la place de
+  # la commande normalement prévue à ce pas-là.
+  - id: g_pending_cmd
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+
+# ---- Réception cmd_vel (Nav2, via slam_bridge.py) ----
 text_sensor:
   - platform: mqtt_subscribe
     id: cmd_vel_in
@@ -101,8 +132,6 @@ text_sensor:
     on_value:
       then:
         - lambda: |-
-            // Payload attendu (publié par slam_bridge.py) :
-            //   {"linear_x": float, "angular_z": float, "timestamp": float}
             json::parse_json(x, [](JsonObject root) -> bool {
               if (!root.containsKey("linear_x") || !root.containsKey("angular_z"))
                 return false;
@@ -112,36 +141,96 @@ text_sensor:
               return true;
             });
 
+  # ---- Réception des commandes brosse/aspirateur + reset sécurité ----
+  # Payloads attendus (texte brut, pas de JSON) :
+  #   "clean_on"  -> Clean CleaningEnable  (active brosse+aspirateur)
+  #   "clean_off" -> Clean CleaningDisable
+  #   "clear_safety_stop" -> réarme g_safety_stop après vérification manuelle
+  #
+  # NON VÉRIFIÉ : "Clean CleaningEnable"/"CleaningDisable" viennent de
+  # research/hidden-commands.md (doc, pas de capture réelle comme
+  # GetMotor). A confirmer en TestMode avant de compter dessus pendant un
+  # vrai cycle de nettoyage.
+  - platform: mqtt_subscribe
+    id: clean_cmd_in
+    topic: ${mqtt_clean_cmd_topic}
+    on_value:
+      then:
+        - lambda: |-
+            if (x == "clean_on") {
+              id(g_pending_cmd) = "Clean CleaningEnable \n";
+            } else if (x == "clean_off") {
+              id(g_pending_cmd) = "Clean CleaningDisable \n";
+            } else if (x == "clear_safety_stop") {
+              // Réarmement volontaire seulement - ne jamais faire ça
+              // automatiquement depuis un autre bout de ce fichier.
+              id(g_safety_stop) = false;
+              ESP_LOGW("safety", "g_safety_stop reinitialise manuellement via MQTT");
+            }
+
 script:
-  # mode: single -> si un cycle précédent n'est pas terminé (ne devrait pas
-  # arriver avec un slam_poll_interval assez large), on saute ce tour au
-  # lieu d'empiler des commandes et de vraiment corrompre l'UART.
+  # mode: single -> si un cycle précédent n'est pas terminé, on saute ce
+  # tour au lieu d'empiler des commandes et de corrompre l'UART.
   - id: slam_poll_cycle
     mode: single
     then:
       - lambda: |-
-          int step = id(g_slam_poll_step);
-          id(g_slam_poll_step) = (step + 1) % 3;
+          // Séquence priorisant la sécurité : Digital et Analog reviennent
+          // toutes les 3 étapes chacun (6 pas de sécurité sur 9), les
+          // tâches "normales" (SetMotor, GetMotor, GetLDSScan) se
+          // partagent les 3 pas restants, une fois chacune par cycle.
+          // 0=GetDigitalSensors, 1=GetAnalogSensors, 2=SetMotor,
+          // 3=GetMotor, 4=GetLDSScan
+          static const int SEQ[9] = {0, 1, 2, 0, 1, 3, 0, 1, 4};
 
-          if (step == 0) {
+          int step = id(g_slam_poll_step);
+          id(g_slam_poll_step) = (step + 1) % 9;
+          int action = SEQ[step];
+
+          // ---- Injection one-shot prioritaire (brosse/aspirateur) ----
+          // Passe devant l'action normalement prévue à ce pas, mais
+          // JAMAIS devant une lecture de sécurité (action 0 ou 1) - la
+          // sécurité ne doit jamais être retardée par une commande de
+          // confort comme activer la brosse.
+          if (!id(g_pending_cmd).empty() && action != 0 && action != 1) {
+            id(uart_bus).write_str(id(g_pending_cmd));
+            id(g_pending_cmd) = "";
+            return;
+          }
+
+          if (action == 0) {
+            id(uart_bus).write_str("GetDigitalSensors \n");
+            return;
+          }
+          if (action == 1) {
+            id(uart_bus).write_str("GetAnalogSensors \n");
+            return;
+          }
+          if (action == 3) {
             id(uart_bus).write_str("GetMotor \n");
             return;
           }
-          if (step == 1) {
+          if (action == 4) {
             id(uart_bus).write_str("GetLDSScan \n");
             return;
           }
 
-          // step == 2 : SetMotor, traduit depuis le dernier cmd_vel reçu
+          // action == 2 : SetMotor, traduit depuis le dernier cmd_vel reçu
           uint32_t now = millis();
           bool stale = (id(g_cmd_last_ms) == 0) ||
                        (now - id(g_cmd_last_ms) > ${cmd_vel_stale_timeout});
 
-          float lin = stale ? 0.0f : id(g_cmd_linear_x);
-          float ang = stale ? 0.0f : id(g_cmd_angular_z);
+          // Priorité absolue à l'arrêt d'urgence latché, quel que soit
+          // l'état de cmd_vel.
+          if (id(g_safety_stop) || stale) {
+            id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+            return;
+          }
 
-          // Arrêt franc si rien à faire (pas de cmd_vel frais, ou cmd_vel nul)
-          if (stale || (fabsf(lin) < 0.005f && fabsf(ang) < 0.01f)) {
+          float lin = id(g_cmd_linear_x);
+          float ang = id(g_cmd_angular_z);
+
+          if (fabsf(lin) < 0.005f && fabsf(ang) < 0.01f) {
             id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
             return;
           }
@@ -157,7 +246,7 @@ script:
           float speed = fmaxf(fabsf(v_left), fabsf(v_right)) * 1000.0f;
           float max_speed = ${setmotor_max_speed};
           if (speed > max_speed) speed = max_speed;
-          if (speed < 10.0f) speed = 10.0f;  // plancher pour ne pas envoyer Speed 0 (ignoré par le robot)
+          if (speed < 10.0f) speed = 10.0f;
 
           char cmd[96];
           int len = snprintf(cmd, sizeof(cmd),
