@@ -38,7 +38,7 @@ from rclpy.executors import SingleThreadedExecutor
 
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from nav2_msgs.action import FollowWaypoints
 
 try:
@@ -74,6 +74,7 @@ class CoveragePlanner(Node):
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
         self.create_subscription(Bool, '/safety_stop', self._on_safety_stop, 10)
         self.create_subscription(Bool, '/start_cleaning', self._on_start_cleaning, 10)
+        self.create_subscription(String, '/clean_zone_request', self._on_zone_request, 10)
 
         self._waypoints_client = ActionClient(self, FollowWaypoints, 'follow_waypoints')
 
@@ -136,8 +137,30 @@ class CoveragePlanner(Node):
         else:
             self._abort_cleaning()
 
+    def _on_zone_request(self, msg: String):
+        """Reçoit un polygone à nettoyer, payload JSON :
+        {"polygon": [[x1,y1],[x2,y2],[x3,y3],...]} en coordonnées monde
+        (mètres, repère "map" - le même que la carte SLAM), au moins 3
+        points. Publié par slam_server.py (/api/clean/zone), lui-même
+        appelé par la carte interactive côté Home Assistant."""
+        if self._safety_stop:
+            self.get_logger().error(
+                "Démarrage zone refusé : safety_stop actif. Vérifie le robot avant de relancer."
+            )
+            return
+        try:
+            data = json.loads(msg.data)
+            polygon = [(float(p[0]), float(p[1])) for p in data["polygon"]]
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, IndexError) as e:
+            self.get_logger().error(f"Requête de zone invalide, ignorée: {e}")
+            return
+        if len(polygon) < 3:
+            self.get_logger().error("Polygone de zone invalide (moins de 3 points), ignoré")
+            return
+        self._start_cleaning(polygon=polygon)
+
     # ------------------------------------------------------------- Cycle nettoyage
-    def _start_cleaning(self):
+    def _start_cleaning(self, polygon=None):
         if self._running:
             self.get_logger().warn("Un cycle de nettoyage est déjà en cours, ignoré")
             return
@@ -148,12 +171,16 @@ class CoveragePlanner(Node):
             self.get_logger().error("Pas de carte disponible pour l'instant, annulé")
             return
 
-        waypoints = self._generate_coverage_waypoints(map_msg)
+        waypoints = self._generate_coverage_waypoints(map_msg, polygon=polygon)
         if not waypoints:
-            self.get_logger().error("Aucun waypoint de couverture généré (carte vide/trop petite ?)")
+            self.get_logger().error(
+                "Aucun waypoint de couverture généré (carte vide, zone trop petite, "
+                "ou zone entièrement hors des zones connues comme libres)"
+            )
             return
 
-        self.get_logger().info(f"Cycle de nettoyage : {len(waypoints)} points de passage")
+        zone_desc = f"zone ({len(polygon)} points)" if polygon else "carte entière"
+        self.get_logger().info(f"Cycle de nettoyage [{zone_desc}] : {len(waypoints)} points de passage")
 
         if not self._waypoints_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error("Action follow_waypoints indisponible (Nav2 lancé ? NAV2_ENABLED=true ?)")
@@ -210,7 +237,7 @@ class CoveragePlanner(Node):
         self._running = False
 
     # ------------------------------------------------------- Génération du parcours
-    def _generate_coverage_waypoints(self, map_msg: OccupancyGrid):
+    def _generate_coverage_waypoints(self, map_msg: OccupancyGrid, polygon=None):
         info = map_msg.info
         w, h, res = info.width, info.height, info.resolution
         if w == 0 or h == 0:
@@ -223,6 +250,10 @@ class CoveragePlanner(Node):
 
         margin_cells = max(1, int(round(self.robot_radius_m / res)))
         safe = self._erode_free(free, margin_cells)
+
+        if polygon is not None:
+            zone_mask = self._polygon_mask(polygon, info, w, h)
+            safe = safe & zone_mask
 
         row_spacing_cells = max(1, int(round(self.row_spacing_m / res)))
         min_segment_cells = max(1, int(round(self.min_segment_m / res)))
@@ -244,6 +275,33 @@ class CoveragePlanner(Node):
             reverse = not reverse
 
         return waypoints
+
+    @staticmethod
+    def _polygon_mask(polygon_world, info, w: int, h: int) -> np.ndarray:
+        """Renvoie un masque booléen (h, w) : True pour les cellules dont
+        le centre tombe à l'intérieur du polygone (coordonnées monde,
+        repère "map"). Algorithme du ray casting (règle pair/impair),
+        vectorisé avec numpy - pas de dépendance à shapely/matplotlib."""
+        res = info.resolution
+        # Grille des coordonnées monde du centre de chaque cellule
+        cols = np.arange(w)
+        rows = np.arange(h)
+        wx = info.origin.position.x + (cols + 0.5) * res          # (w,)
+        wy = info.origin.position.y + (rows + 0.5) * res          # (h,)
+        WX, WY = np.meshgrid(wx, wy)                                # (h, w) chacun
+
+        mask = np.zeros((h, w), dtype=bool)
+        n = len(polygon_world)
+        for i in range(n):
+            x1, y1 = polygon_world[i]
+            x2, y2 = polygon_world[(i + 1) % n]
+            # Arête traversée par le rayon horizontal partant de (WX,WY) ?
+            cond = ((y1 > WY) != (y2 > WY))
+            with np.errstate(divide='ignore', invalid='ignore'):
+                x_intersect = (x2 - x1) * (WY - y1) / (y2 - y1 + 1e-12) + x1
+            crosses = cond & (WX < x_intersect)
+            mask ^= crosses
+        return mask
 
     @staticmethod
     def _erode_free(free: np.ndarray, margin_cells: int) -> np.ndarray:
