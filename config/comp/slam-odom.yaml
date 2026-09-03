@@ -338,7 +338,7 @@ script:
           // réponse est détecté.
           if (id(g_awaiting_response)) {
             uint32_t waited = millis() - id(g_awaiting_response_since_ms);
-            if (waited < 3000) {
+            if (waited < 6000) {
               // Pas encore de réponse complète, on attend le prochain tick.
               return;
             }
