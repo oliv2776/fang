@@ -65,7 +65,7 @@ class SlamServer(Node):
         self.map_frame = self.declare_parameter('map_frame', 'map').value
         self.base_frame = self.declare_parameter('base_frame', 'base_link').value
         self.pose_poll_rate = float(self.declare_parameter('pose_poll_rate', 10.0).value)
-        self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.126').value
+        self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.108').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
 
