@@ -26,6 +26,7 @@ import math
 import os
 import time
 import threading
+import uuid
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
@@ -90,6 +91,10 @@ class SlamServer(Node):
         self.zone_pub = self.create_publisher(String, '/clean_zone_request', 10)
         self._safety_stop = False
 
+        # --- Zones nommées (persistées sur disque, survivent au redémarrage) ---
+        self._zones_file = "/app/maps/zones.json"
+        self._zones = self._load_zones()
+
         # --- Démarrer les serveurs ---
         if HAS_FLASK:
             self._start_flask()
@@ -112,6 +117,43 @@ class SlamServer(Node):
         with self._lock:
             self._safety_stop = msg.data
         self._broadcast({"type": "safety_stop", "data": {"stop": msg.data}})
+
+    # -------------------------------------------------------- Zones nommées
+    # Palette et icônes volontairement limitées à un ensemble fixe (pas de
+    # champ libre non validé) - évite de stocker n'importe quelle chaîne
+    # arbitraire envoyée par le frontend.
+    ZONE_COLORS = {"red", "blue", "green", "amber", "purple", "teal", "pink", "gray"}
+    ZONE_ICONS = {"sofa", "cooking", "bed", "bath", "door", "box", "plant", "tv", "stairs", "washing-machine"}
+
+    def _load_zones(self) -> dict:
+        try:
+            with open(self._zones_file) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        return {}
+
+    def _save_zones(self):
+        os.makedirs(os.path.dirname(self._zones_file), exist_ok=True)
+        with open(self._zones_file, 'w') as f:
+            json.dump(self._zones, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def _validate_polygon(polygon) -> bool:
+        if not isinstance(polygon, list) or len(polygon) < 3:
+            return False
+        try:
+            [(float(p[0]), float(p[1])) for p in polygon]
+        except (TypeError, ValueError, IndexError):
+            return False
+        return True
+
+    def _publish_zone_polygon(self, polygon):
+        msg = String()
+        msg.data = json.dumps({"polygon": polygon})
+        self.zone_pub.publish(msg)
 
     def _update_pose_from_tf(self):
         try:
@@ -243,18 +285,73 @@ class SlamServer(Node):
                 return jsonify({"error": "corps attendu: {\"polygon\": [[x,y],...]}"}), 400
 
             polygon = body["polygon"]
-            if not isinstance(polygon, list) or len(polygon) < 3:
-                return jsonify({"error": "polygon doit contenir au moins 3 points [x,y]"}), 400
-            try:
-                # Validation : chaque point doit être une paire de nombres.
-                [(float(p[0]), float(p[1])) for p in polygon]
-            except (TypeError, ValueError, IndexError):
-                return jsonify({"error": "points de polygon invalides, attendu [x,y] numériques"}), 400
+            if not self._validate_polygon(polygon):
+                return jsonify({"error": "polygon doit contenir au moins 3 points [x,y] numériques"}), 400
 
-            msg = String()
-            msg.data = json.dumps({"polygon": polygon})
-            self.zone_pub.publish(msg)
+            self._publish_zone_polygon(polygon)
             return jsonify({"status": "zone_cleaning_requested", "points": len(polygon)})
+
+        @app.route('/api/zones')
+        def list_zones():
+            with self._lock:
+                return jsonify(list(self._zones.values()))
+
+        @app.route('/api/zones', methods=['POST'])
+        def save_zone():
+            body = request.get_json(silent=True)
+            if not body:
+                return jsonify({"error": "corps JSON attendu"}), 400
+
+            name = str(body.get("name", "")).strip()
+            polygon = body.get("polygon")
+            color = body.get("color", "gray")
+            icon = body.get("icon", "box")
+
+            if not name:
+                return jsonify({"error": "'name' requis"}), 400
+            if not self._validate_polygon(polygon):
+                return jsonify({"error": "polygon doit contenir au moins 3 points [x,y] numériques"}), 400
+            if color not in self.ZONE_COLORS:
+                return jsonify({"error": f"color doit être l'une de: {sorted(self.ZONE_COLORS)}"}), 400
+            if icon not in self.ZONE_ICONS:
+                return jsonify({"error": f"icon doit être l'une de: {sorted(self.ZONE_ICONS)}"}), 400
+
+            zone_id = str(uuid.uuid4())[:8]
+            zone = {
+                "id": zone_id,
+                "name": name,
+                "polygon": polygon,
+                "color": color,
+                "icon": icon,
+                "created_at": time.time(),
+            }
+            with self._lock:
+                self._zones[zone_id] = zone
+                self._save_zones()
+            return jsonify(zone), 201
+
+        @app.route('/api/zones/<zone_id>', methods=['DELETE'])
+        def delete_zone(zone_id):
+            with self._lock:
+                if zone_id not in self._zones:
+                    return jsonify({"error": "zone inconnue"}), 404
+                del self._zones[zone_id]
+                self._save_zones()
+            return jsonify({"status": "deleted"})
+
+        @app.route('/api/clean/zone/<zone_id>', methods=['POST'])
+        def clean_named_zone(zone_id):
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de démarrer"
+                    }), 409
+                zone = self._zones.get(zone_id)
+            if zone is None:
+                return jsonify({"error": "zone inconnue"}), 404
+
+            self._publish_zone_polygon(zone["polygon"])
+            return jsonify({"status": "zone_cleaning_requested", "zone": zone["name"]})
 
         @app.route('/api/diagnose/run', methods=['POST'])
         def run_diagnose():
