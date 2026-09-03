@@ -100,6 +100,18 @@ if [ "${NAV2_ENABLED:-false}" = "true" ]; then
             > /app/logs/nav2_lifecycle.log 2>&1 &
     NAV2_LIFECYCLE_PID=$!
     echo "[OK] nav2 lifecycle_manager (PID=$NAV2_LIFECYCLE_PID)"
+
+    # --- coverage_planner (couverture zigzag + brosse/aspirateur) ---
+    python3 /app/src/coverage_planner.py \
+            --ros-args \
+            -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+            -p mqtt_port:="${MQTT_PORT:-1883}" \
+            -p mqtt_clean_cmd_topic:="${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}" \
+            -p robot_radius_m:="${ROBOT_RADIUS_M:-0.20}" \
+            -p row_spacing_m:="${ROW_SPACING_M:-0.32}" \
+            > /app/logs/coverage_planner.log 2>&1 &
+    COVERAGE_PID=$!
+    echo "[OK] coverage_planner (PID=$COVERAGE_PID)"
 fi
 
 # --- 4. slam_bridge (MQTT/WS -> ROS2 topics /odom, /scan, /cmd_vel_manual ;
@@ -148,7 +160,7 @@ cleanup() {
     echo "Arret des processus..."
     kill $RSP_PID $EKF_PID $SLAM_PID $BRIDGE_PID $SERVER_PID $ROSBRIDGE_PID \
          $NAV2_CONTROLLER_PID $NAV2_PLANNER_PID $NAV2_BEHAVIOR_PID \
-         $NAV2_BT_PID $NAV2_WAYPOINT_PID $NAV2_LIFECYCLE_PID 2>/dev/null
+         $NAV2_BT_PID $NAV2_WAYPOINT_PID $NAV2_LIFECYCLE_PID $COVERAGE_PID 2>/dev/null
     wait 2>/dev/null
     exit 0
 }
@@ -266,6 +278,18 @@ while true; do
                     --ros-args --params-file "${NAV2_PARAMS_FILE}" \
                     > /app/logs/nav2_lifecycle.log 2>&1 &
             NAV2_LIFECYCLE_PID=$!
+        fi
+        if ! kill -0 $COVERAGE_PID 2>/dev/null; then
+            echo "[WARN] coverage_planner mort, relance..."
+            python3 /app/src/coverage_planner.py \
+                    --ros-args \
+                    -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+                    -p mqtt_port:="${MQTT_PORT:-1883}" \
+                    -p mqtt_clean_cmd_topic:="${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}" \
+                    -p robot_radius_m:="${ROBOT_RADIUS_M:-0.20}" \
+                    -p row_spacing_m:="${ROW_SPACING_M:-0.32}" \
+                    > /app/logs/coverage_planner.log 2>&1 &
+            COVERAGE_PID=$!
         fi
     fi
 
