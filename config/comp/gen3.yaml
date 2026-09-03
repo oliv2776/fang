@@ -492,15 +492,16 @@ uart:
           //
           // SEUIL NON CALIBRE : la valeur "19" ci-dessus vient d'un robot
           // pose sur un sol normal. Je n'ai aucune capture de la valeur
-          // lue au-dessus d'un vide (escalier). Le seuil de 60mm ci-dessous
-          // est une marge de securite arbitraire (3x la valeur "sol normal"
-          // observee) - A CALIBRER : souleve le robot au-dessus du vide en
-          // TestMode, note la valeur DropSensor lue, et ajuste
-          // DROP_SENSOR_THRESHOLD_MM en consequence AVANT de faire confiance
-          // a cette protection pour un vrai escalier.
+          // lue au-dessus d'un vide (escalier). Le seuil ci-dessous est
+          // maintenant une valeur CALIBRABLE A CHAUD (id g_cal_drop_threshold_mm,
+          // definie dans slam-odom.yaml, persistee en flash) plutot qu'une
+          // constante figee - voir slam/calibrate.py pour la mesurer
+          // proprement (sol normal vs au-dessus du vide) sans avoir a
+          // reflasher a chaque essai.
           else if (command == "GetAnalogSensors") {
-            static const int DROP_SENSOR_THRESHOLD_MM = 60;
             bool cliff = false;
+            int drop_left_mm = -1;
+            int drop_right_mm = -1;
 
             for (size_t i = 2; i < lines.size(); i++) {
               std::string &line = lines[i];
@@ -520,7 +521,9 @@ uart:
 
               if (key == "DropSensorLeft" || key == "DropSensorRight") {
                 int value = atoi(value_str.c_str());
-                if (value > DROP_SENSOR_THRESHOLD_MM) cliff = true;
+                if (key == "DropSensorLeft") drop_left_mm = value;
+                else drop_right_mm = value;
+                if (value > id(g_cal_drop_threshold_mm)) cliff = true;
               }
             }
 
@@ -531,17 +534,21 @@ uart:
               id(g_safety_stop) = true;
             }
 
-            // Publication MQTT du statut de securite complet (les 3 flags),
-            // qu'il y ait alerte ou non - permet au conteneur Docker de
-            // suivre l'etat en continu, pas seulement lors d'un declenchement.
-            char safety_payload[160];
+            // Publication MQTT du statut de securite complet (3 flags +
+            // valeurs BRUTES des capteurs de vide, necessaires pour
+            // calibrer g_cal_drop_threshold_mm depuis slam/calibrate.py -
+            // sans elles, impossible de savoir quelle valeur mettre).
+            char safety_payload[220];
             int slen = snprintf(
                 safety_payload, sizeof(safety_payload),
-                "{\"bump\":%s,\"cliff\":%s,\"wheel_extended\":%s,\"stop\":%s,\"timestamp\":%.3f}",
+                "{\"bump\":%s,\"cliff\":%s,\"wheel_extended\":%s,\"stop\":%s,"
+                "\"drop_left_mm\":%d,\"drop_right_mm\":%d,\"drop_threshold_mm\":%.1f,"
+                "\"timestamp\":%.3f}",
                 id(g_safety_bump) ? "true" : "false",
                 id(g_safety_cliff) ? "true" : "false",
                 id(g_safety_wheel_extended) ? "true" : "false",
                 id(g_safety_stop) ? "true" : "false",
+                drop_left_mm, drop_right_mm, id(g_cal_drop_threshold_mm),
                 millis() / 1000.0
             );
             if (slen > 0 && slen < (int) sizeof(safety_payload)) {
