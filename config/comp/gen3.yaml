@@ -266,7 +266,7 @@ uart:
           // identifiée, on contourne plutôt que de continuer à chercher).
           // Retire cette ligne une fois GetLDSScan validé, elle rend les
           // logs très verbeux en continu.
-          ESP_LOGD("uart_raw", "chunk brut: [%s]", chunk.c_str());
+          ESP_LOGW("uart_raw", "chunk brut: [%s]", chunk.c_str());
 
           // Un \x1A en tete de ce chunk = fin de la reponse precedente.
           // On finalise cette reponse-la AVANT de traiter le reste du
