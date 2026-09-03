@@ -19,9 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         ros-humble-slam-toolbox \
         ros-humble-robot-state-publisher \
-        ros-humble-ros2-launch \
-        ros-humble-ros2-topic \
-        ros-humble-ros2-service \
+        ros-humble-ros2launch \
+        ros-humble-ros2topic \
+        ros-humble-ros2service \
         ros-humble-std-msgs \
         ros-humble-geometry-msgs \
         ros-humble-nav-msgs \
@@ -29,7 +29,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-tf2-ros \
         ros-humble-tf2-geometry-msgs \
         ros-humble-robot-localization \
-        ros-humble-rosbridge-protocol \
         ros-humble-rosbridge-server \
         ros-humble-std-srvs \
         ros-humble-visualization-msgs \
