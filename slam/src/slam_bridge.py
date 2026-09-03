@@ -111,6 +111,8 @@ class SlamBridge(Node):
         # --- Déclarations de paramètres ---
         self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.108').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
+        self.mqtt_username = self.declare_parameter('mqtt_username', '').value
+        self.mqtt_password = self.declare_parameter('mqtt_password', '').value
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
         self.ws_port = int(self.declare_parameter('ws_port', 2003).value)
 
@@ -192,32 +194,52 @@ class SlamBridge(Node):
             # paho-mqtt < 2.0 : API classique
             self._mqtt_client = mqtt.Client()
 
+        if self.mqtt_username:
+            self._mqtt_client.username_pw_set(self.mqtt_username, self.mqtt_password)
+
         self._mqtt_client.on_connect = self._on_mqtt_connect
         self._mqtt_client.on_disconnect = self._on_mqtt_disconnect
         self._mqtt_client.on_message = self._on_mqtt_message
 
+        self._mqtt_reconnecting = False
         self._connect_mqtt()
 
     def _connect_mqtt(self):
+        # Garde contre les reconnexions superposées : sans ça, un
+        # disconnect + un timeout de connexion proches dans le temps
+        # pouvaient chacun programmer leur propre relance, empilant
+        # plusieurs tentatives simultanées sur le même client - source de
+        # logs incohérents (rc=5 et "connecté" qui semblent alterner sans
+        # rapport), pas juste un problème d'identifiants.
+        if self._mqtt_reconnecting:
+            return
+        self._mqtt_reconnecting = True
         try:
             self._mqtt_client.connect(
                 self.mqtt_broker, self.mqtt_port, keepalive=60
             )
             self._mqtt_client.loop_start()
-            self.get_logger().info(
-                f"MQTT connecté à {self.mqtt_broker}:{self.mqtt_port}"
-            )
+            # PAS de log "connecté" ici : connect() ne fait qu'initier la
+            # connexion TCP, le vrai résultat (accepté/refusé par le
+            # broker, ex: rc=5 = pas autorisé) n'arrive que plus tard via
+            # _on_mqtt_connect. Logger "connecté" ici était trompeur -
+            # s'affichait à chaque tentative, réussie ou non.
         except Exception as e:
             self.get_logger().error(
                 f"MQTT connect failed: {e}, retry in 5s..."
             )
+            self._mqtt_reconnecting = False
             self._mqtt_reconnect_timer = threading.Timer(5.0, self._connect_mqtt)
             self._mqtt_reconnect_timer.daemon = True
             self._mqtt_reconnect_timer.start()
 
     def _on_mqtt_connect(self, client, userdata, flags, rc):
+        self._mqtt_reconnecting = False
         if rc == 0:
             self._mqtt_connected = True
+            self.get_logger().info(
+                f"MQTT connecté à {self.mqtt_broker}:{self.mqtt_port}"
+            )
             prefix = self.mqtt_prefix
             # Tout est en JSON, y compris le scan (voir config/comp/gen3.yaml,
             # branche GetLDSScan, et config/comp/slam-odom.yaml pour le topic).
@@ -229,6 +251,12 @@ class SlamBridge(Node):
             self.get_logger().info(
                 f"MQTT subscribed to {prefix}/{{odom,wheels,cmd_vel,scan}}"
             )
+        elif rc == 5:
+            self.get_logger().error(
+                "MQTT connect rc=5 (accès refusé - identifiants manquants/"
+                "invalides). Vérifie mqtt_username/mqtt_password (paramètres "
+                "ROS, voir MQTT_USERNAME/MQTT_PASSWORD dans .env)."
+            )
         else:
             self.get_logger().error(f"MQTT connect rc={rc}")
 
@@ -238,6 +266,7 @@ class SlamBridge(Node):
             self.get_logger().warn(
                 f"MQTT déconnecté (rc={rc}), reconnexion dans 5s..."
             )
+            self._mqtt_reconnecting = False
             self._mqtt_reconnect_timer = threading.Timer(5.0, self._connect_mqtt)
             self._mqtt_reconnect_timer.daemon = True
             self._mqtt_reconnect_timer.start()
