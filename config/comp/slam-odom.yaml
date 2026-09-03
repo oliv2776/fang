@@ -60,7 +60,10 @@ substitutions:
   slam_poll_interval: 500ms
 
   # Si aucun cmd_vel_out frais depuis plus longtemps que ça, arrêt auto.
-  cmd_vel_stale_timeout: 2500ms
+  # En millisecondes (entier brut, PAS le format "2500ms" - cette valeur
+  # est interpolée directement dans une comparaison C++ brute, pas dans
+  # un champ YAML natif ESPHome qui accepterait le suffixe "ms").
+  cmd_vel_stale_timeout: "2500"
 
   # Anticipation (secondes) utilisée pour convertir une vitesse en
   # distance de roue pour SetMotor. Doit couvrir au moins un cycle complet
@@ -191,7 +194,7 @@ text_sensor:
       then:
         - lambda: |-
             json::parse_json(x, [](JsonObject root) -> bool {
-              if (!root.containsKey("linear_x") || !root.containsKey("angular_z"))
+              if (!root["linear_x"].is<float>() || !root["angular_z"].is<float>())
                 return false;
               id(g_cmd_linear_x) = root["linear_x"].as<float>();
               id(g_cmd_angular_z) = root["angular_z"].as<float>();
@@ -278,7 +281,7 @@ script:
           // ni scan. Ne l'utilise que robot immobile/supervisé.
           if (id(g_slam_poll_paused)) {
             if (!id(g_pending_cmd).empty()) {
-              id(uart_bus).write_str(id(g_pending_cmd));
+              id(uart_bus).write_str(id(g_pending_cmd).c_str());
               id(g_pending_cmd) = "";
             }
             return;
@@ -294,7 +297,7 @@ script:
           // sécurité ne doit jamais être retardée par une commande de
           // confort comme activer la brosse.
           if (!id(g_pending_cmd).empty() && action != 0 && action != 1) {
-            id(uart_bus).write_str(id(g_pending_cmd));
+            id(uart_bus).write_str(id(g_pending_cmd).c_str());
             id(g_pending_cmd) = "";
             return;
           }
@@ -355,7 +358,7 @@ script:
                               "SetMotor RWheelDist %ld LWheelDist %ld Speed %d \n",
                               dist_right_mm, dist_left_mm, (int) speed);
           if (len > 0 && len < (int) sizeof(cmd)) {
-            id(uart_bus).write_str(std::string(cmd, len));
+            id(uart_bus).write_str(cmd);
           }
 
 interval:
