@@ -313,6 +313,16 @@ script:
           // ni scan. Ne l'utilise que robot immobile/supervisé.
           if (id(g_slam_poll_paused)) {
             if (!id(g_pending_cmd).empty()) {
+              // Marquer g_awaiting_response ICI AUSSI, pas seulement dans
+              // le round-robin normal ci-dessous : sans ça, un
+              // "resume_polling" envoyé pendant qu'une commande de test
+              // injectée (ex: raw:GetLDSScan, ~1.5-2s de réponse) est
+              // encore en train de répondre, le round-robin qui reprend
+              // n'a aucun moyen de savoir qu'il faut attendre, et envoie
+              // une nouvelle commande par-dessus - corruption confirmée
+              // sur robot réel dans ce scénario précis.
+              id(g_awaiting_response) = true;
+              id(g_awaiting_response_since_ms) = millis();
               id(uart_bus).write_str(id(g_pending_cmd).c_str());
               id(g_pending_cmd) = "";
             }
