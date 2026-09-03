@@ -40,3 +40,4 @@ packages:
   # - !include comp/gen2.yaml
 
   - !include comp/ros.yaml
+  - !include comp/slam-odom.yaml
