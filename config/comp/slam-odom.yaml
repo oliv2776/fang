@@ -1,0 +1,58 @@
+# config/comp/slam-odom.yaml
+#
+# À inclure dans config/local.yaml (section "packages:") pour activer
+# la publication MQTT de l'odométrie (positions des roues) consommée par
+# slam_bridge.py côté conteneur Docker.
+#
+#   packages:
+#     ...
+#     - !include comp/slam-odom.yaml
+#
+# Le parsing de la réponse "GetMotor" elle-même (extraction des champs
+# LeftWheel_PositionInMM / RightWheel_PositionInMM et l'appel MQTT publish)
+# est fait directement dans config/comp/gen3.yaml, dans le même parseur
+# UART que GetCharger/GetState/etc. Ce fichier ne fait qu'ajouter :
+#   1. Le composant mqtt: (broker) nécessaire au publish
+#   2. Le polling périodique qui envoie "GetMotor" sur l'UART
+#
+# ATTENTION - conflit avec fang-custom/neato_lidar_stream.yaml :
+# Ce fichier définit le composant mqtt: (id: neato_mqtt). Si tu inclus
+# AUSSI neato_lidar_stream.yaml, retire son propre bloc "mqtt:" (celui-ci
+# suffit pour les deux usages) sinon ESPHome refusera de compiler
+# (redéclaration du même id / broker en double).
+#
+# ATTENTION - partage de l'UART avec le flux LiDAR :
+# Le LiDAR (neato_lidar) fonctionne en streaming continu sur le même bus
+# UART que "GetMotor". Envoyer "GetMotor" PENDANT que le flux LiDAR binaire
+# est actif va corrompre les deux parsings (le parseur GetMotor attend des
+# lignes texte, le parseur LiDAR attend des octets binaires en continu).
+# Tant que ce n'est pas résolu (time-multiplexing des deux flux, ou second
+# UART), ne teste l'odométrie qu'avec le streaming LiDAR arrêté, et vice
+# versa. C'est un point ouvert à traiter avant de faire du mapping complet.
+
+substitutions:
+  # Doivent correspondre à MQTT_BROKER / MQTT_PORT / MQTT_PREFIX dans
+  # slam/.env (côté conteneur Docker).
+  mqtt_broker: "192.168.10.126"
+  mqtt_port: "1883"
+  mqtt_wheels_topic: "neato/robot/wheels"
+
+  # Fréquence de polling de GetMotor. Plus bas = odométrie plus fine mais
+  # plus de trafic sur l'UART (partagé avec le reste des commandes).
+  # 200ms = 5Hz, une base raisonnable pour du dead-reckoning à vitesse
+  # d'aspirateur (quelques dizaines de cm/s).
+  motor_poll_interval: 200ms
+
+mqtt:
+  - id: neato_mqtt
+    broker: ${mqtt_broker}
+    port: ${mqtt_port}
+    # Décommenter et utiliser !secret si ton broker demande une auth :
+    # username: !secret mqtt_username
+    # password: !secret mqtt_password
+    discovery: false  # on ne veut pas polluer Home Assistant avec ce broker
+
+interval:
+  - interval: ${motor_poll_interval}
+    then:
+      - uart.write: "GetMotor \n"
