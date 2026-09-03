@@ -336,6 +336,72 @@ uart:
             }
           }
 
+          // ---- SLAM: GetMotor -> publie l'odometrie (roues) en MQTT ----
+          // Format confirme sur ce robot (voir research/command-experiments.md) :
+          //   GetMotor
+          //   Parameter,Value
+          //   Brush_RPM,0
+          //   ...
+          //   LeftWheel_PositionInMM,-365
+          //   ...
+          //   RightWheel_PositionInMM,-365
+          //   ...
+          // Note : la commande reelle est bien "GetMotor" (singulier), pas
+          // "GetMotors" comme liste dans la doc officielle Neato.
+          else if (command == "GetMotor") {
+            bool have_left = false, have_right = false;
+            double left_mm = 0.0, right_mm = 0.0;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+
+              size_t comma = line.find(',');
+              if (comma == std::string::npos) continue;
+
+              std::string key = line.substr(0, comma);
+              std::string value = line.substr(comma + 1);
+
+              trim(key);
+              trim(value);
+
+              if (key == "LeftWheel_PositionInMM") {
+                left_mm = atof(value.c_str());
+                have_left = true;
+              } else if (key == "RightWheel_PositionInMM") {
+                right_mm = atof(value.c_str());
+                have_right = true;
+              }
+            }
+
+            // On ne publie que si on a bien recupere les deux valeurs,
+            // sinon slam_bridge.py risque de recevoir un delta faux (une
+            // seule roue mise a jour par rapport au message precedent).
+            if (have_left && have_right) {
+              // Horloge relative (secondes depuis le boot de l'ESP) : le
+              // bridge SLAM ne calcule que des deltas de temps entre deux
+              // messages, donc pas besoin d'une horloge absolue (NTP/HA).
+              double ts = millis() / 1000.0;
+
+              char payload[128];
+              int len = snprintf(
+                  payload, sizeof(payload),
+                  "{\"left_mm\":%.2f,\"right_mm\":%.2f,\"timestamp\":%.3f}",
+                  left_mm, right_mm, ts
+              );
+
+              if (len > 0 && len < (int) sizeof(payload)) {
+                // "neato_mqtt" est l'id du composant mqtt: defini dans
+                // config/comp/slam-odom.yaml (a inclure dans local.yaml).
+                id(neato_mqtt).publish(
+                    "${mqtt_wheels_topic}",
+                    std::string(payload, len),
+                    0,     // QoS 0 : donnees frequentes, pas critique d'en perdre une
+                    false  // retain = false
+                );
+              }
+            }
+          }
+
           else if (command == "GetWarranty") {
               // Format after the header:
               // Item,Value
@@ -1248,4 +1314,3 @@ button:
 
   - platform: restart
     name: Reboot ESP
-
