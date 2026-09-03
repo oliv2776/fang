@@ -19,6 +19,8 @@ services:
         - RMW_IMPLEMENTATION=rmw_fastrtps_cpp
         - MQTT_BROKER=${MQTT_BROKER:-192.168.10.108}
         - MQTT_PORT=${MQTT_PORT:-1883}
+        - MQTT_USERNAME=${MQTT_USERNAME:-}
+        - MQTT_PASSWORD=${MQTT_PASSWORD:-}
         - MQTT_PREFIX=${MQTT_PREFIX:-neato/robot}
         - SLAM_MODE=${SLAM_MODE:-mapping}
         - REST_PORT=${REST_PORT:-2000}
