@@ -109,7 +109,7 @@ class SlamBridge(Node):
         super().__init__('slam_bridge')
 
         # --- Déclarations de paramètres ---
-        self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.126').value
+        self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.108').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
         self.ws_port = int(self.declare_parameter('ws_port', 2003).value)
