@@ -260,6 +260,14 @@ uart:
 
           std::string chunk(bytes.begin(), bytes.end());
 
+          // Log explicite de la ligne brute reçue, garanti visible (à la
+          // différence de UARTDebug::log_string ci-dessus qui ne semble
+          // rien afficher avec dummy_receiver: true - cause exacte non
+          // identifiée, on contourne plutôt que de continuer à chercher).
+          // Retire cette ligne une fois GetLDSScan validé, elle rend les
+          // logs très verbeux en continu.
+          ESP_LOGD("uart_raw", "chunk brut: [%s]", chunk.c_str());
+
           // Un \x1A en tete de ce chunk = fin de la reponse precedente.
           // On finalise cette reponse-la AVANT de traiter le reste du
           // chunk courant (qui, lui, appartient a la reponse suivante).
