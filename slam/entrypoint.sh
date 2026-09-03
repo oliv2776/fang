@@ -132,6 +132,9 @@ python3 /app/src/slam_server.py \
         --ros-args \
         -p rest_port:="${REST_PORT:-2000}" \
         -p ws_port:="${WS_PORT:-2001}" \
+        -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+        -p mqtt_port:="${MQTT_PORT:-1883}" \
+        -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
         > /app/logs/server.log 2>&1 &
 SERVER_PID=$!
 echo "[OK] slam_server (PID=$SERVER_PID)"
@@ -222,6 +225,9 @@ while true; do
                 --ros-args \
                 -p rest_port:="${REST_PORT:-2000}" \
                 -p ws_port:="${WS_PORT:-2001}" \
+                -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+                -p mqtt_port:="${MQTT_PORT:-1883}" \
+                -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
                 > /app/logs/server.log 2>&1 &
         SERVER_PID=$!
     fi
