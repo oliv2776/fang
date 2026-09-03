@@ -194,14 +194,15 @@ globals:
     initial_value: ''
 
 
-interval:
-  - interval: ${infointerval}
-    then:
-      - uart.write: "GetErr \n"
-      - uart.write: "GetState \n"
-  - interval: ${chargerinterval}
-    then: 
-      - uart.write: "GetCharger \n"
+# ATTENTION : le bloc "interval:" qui envoyait GetErr/GetState/GetCharger
+# indépendamment (via infointerval/chargerinterval) a été retiré d'ici -
+# il tournait EN PARALLÈLE et SANS COORDINATION avec le round-robin de
+# config/comp/slam-odom.yaml, corrompant les réponses des deux côtés
+# (confirmé sur robot réel : fragments "tPwrPresent,1"/"tteryCycles,02ff"
+# dans les logs, des lignes tronquées d'une réponse GetWarranty/GetCharger
+# interrompue par une écriture concurrente). Ces 3 commandes sont
+# maintenant intégrées au round-robin unique dans slam-odom.yaml, seul
+# point d'écriture sur ce bus UART partagé.
 
 
 uart:
