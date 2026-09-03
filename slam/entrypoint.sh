@@ -157,12 +157,12 @@ SERVER_PID=$!
 echo "[OK] slam_server (PID=$SERVER_PID)"
 
 # --- 6. rosbridge_server (WebSocket ROS2 -> JSON pour le front) ---
-ros2 run robot_state_publisher robot_state_publisher \
-        --ros-args --params-file /tmp/rsp_runtime.yaml \
-        > /app/logs/rsp.log 2>&1 &
-RSP_PID=$!
+# --- 6. rosbridge_server (WebSocket ROS2 -> JSON pour le front) ---
+ros2 run rosbridge_server rosbridge_websocket \
+        --ros-args -p port:="${ROSBRIDGE_PORT:-2002}" \
+        > /app/logs/rosbridge.log 2>&1 &
+ROSBRIDGE_PID=$!
 echo "[OK] rosbridge_server (PID=$ROSBRIDGE_PID)"
-
 echo ""
 echo "Tous les processus lancés."
 echo "  REST API         : http://0.0.0.0:${REST_PORT:-2000}"
@@ -192,7 +192,7 @@ while true; do
     if ! kill -0 $RSP_PID 2>/dev/null; then
         echo "[WARN] robot_state_publisher mort, relance..."
         ros2 run robot_state_publisher robot_state_publisher \
-                --ros-args --params-file /app/config/rsp_params.yaml \
+                --ros-args --params-file /tmp/rsp_runtime.yaml \
                 > /app/logs/rsp.log 2>&1 &
         RSP_PID=$!
     fi
@@ -252,7 +252,7 @@ while true; do
     # Vérifier rosbridge
     if ! kill -0 $ROSBRIDGE_PID 2>/dev/null; then
         echo "[WARN] rosbridge mort, relance..."
-        ros2 run rosbridge_server rosbridge_web \
+        ros2 run rosbridge_server rosbridge_websocket \
                 --ros-args -p port:="${ROSBRIDGE_PORT:-2002}" \
                 > /app/logs/rosbridge.log 2>&1 &
         ROSBRIDGE_PID=$!
