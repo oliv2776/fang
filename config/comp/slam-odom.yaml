@@ -79,6 +79,16 @@ globals:
     restore_value: false
     initial_value: '0'
 
+  # true = le round-robin automatique n'envoie plus rien, seul le contenu
+  # de g_pending_cmd (injection manuelle) part encore. Sert aux tests
+  # isolés (cf test_connectivity.sh / TESTING.md). ATTENTION : suspend
+  # aussi la surveillance sécurité automatique - à utiliser robot
+  # immobile/supervisé uniquement.
+  - id: g_slam_poll_paused
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+
   # --- cmd_vel (Nav2 -> MQTT -> SetMotor) ---
   - id: g_cmd_linear_x
     type: float
@@ -141,11 +151,16 @@ text_sensor:
               return true;
             });
 
-  # ---- Réception des commandes brosse/aspirateur + reset sécurité ----
+  # ---- Réception des commandes brosse/aspirateur + reset sécurité + test ----
   # Payloads attendus (texte brut, pas de JSON) :
   #   "clean_on"  -> Clean CleaningEnable  (active brosse+aspirateur)
   #   "clean_off" -> Clean CleaningDisable
   #   "clear_safety_stop" -> réarme g_safety_stop après vérification manuelle
+  #   "pause_polling"  -> suspend le round-robin automatique (tests isolés)
+  #   "resume_polling" -> reprend le round-robin automatique normal
+  #   "raw:<commande>" -> envoie <commande> une seule fois (ex: "raw:GetLDSScan")
+  #                       Respecte quand même la file d'attente (n'écrase
+  #                       pas une commande déjà en attente).
   #
   # NON VÉRIFIÉ : "Clean CleaningEnable"/"CleaningDisable" viennent de
   # research/hidden-commands.md (doc, pas de capture réelle comme
@@ -166,6 +181,16 @@ text_sensor:
               // automatiquement depuis un autre bout de ce fichier.
               id(g_safety_stop) = false;
               ESP_LOGW("safety", "g_safety_stop reinitialise manuellement via MQTT");
+            } else if (x == "pause_polling") {
+              id(g_slam_poll_paused) = true;
+              ESP_LOGW("test", "Round-robin en pause (mode test manuel) - securite automatique suspendue !");
+            } else if (x == "resume_polling") {
+              id(g_slam_poll_paused) = false;
+              ESP_LOGW("test", "Round-robin repris");
+            } else if (x.rfind("raw:", 0) == 0) {
+              std::string cmd = x.substr(4) + " \n";
+              id(g_pending_cmd) = cmd;
+              ESP_LOGW("test", "Commande de test en attente: %s", x.substr(4).c_str());
             }
 
 script:
@@ -182,6 +207,17 @@ script:
           // 0=GetDigitalSensors, 1=GetAnalogSensors, 2=SetMotor,
           // 3=GetMotor, 4=GetLDSScan
           static const int SEQ[9] = {0, 1, 2, 0, 1, 3, 0, 1, 4};
+
+          // Mode pause (tests isolés) : on n'envoie QUE une commande de
+          // test en attente, rien d'autre - ni sécurité, ni odométrie,
+          // ni scan. Ne l'utilise que robot immobile/supervisé.
+          if (id(g_slam_poll_paused)) {
+            if (!id(g_pending_cmd).empty()) {
+              id(uart_bus).write_str(id(g_pending_cmd));
+              id(g_pending_cmd) = "";
+            }
+            return;
+          }
 
           int step = id(g_slam_poll_step);
           id(g_slam_poll_step) = (step + 1) % 9;
