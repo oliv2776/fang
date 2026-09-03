@@ -32,7 +32,7 @@
 substitutions:
   # Doivent correspondre à MQTT_BROKER / MQTT_PORT / MQTT_PREFIX dans
   # slam/.env (côté conteneur Docker).
-  mqtt_broker: "192.168.10.126"
+  mqtt_broker: "192.168.10.108"
   mqtt_port: "1883"
   mqtt_wheels_topic: "neato/robot/wheels"
   mqtt_scan_topic: "neato/robot/scan"
