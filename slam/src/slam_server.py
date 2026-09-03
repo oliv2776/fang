@@ -11,6 +11,14 @@ Endpoints :
   POST    /api/slam/stop       -> arrête le mapping
   POST    /api/slam/save       -> sauvegarde la carte dans /app/maps/
   WS      /ws                  -> flux temps réel (pose, map updates)
+
+BUGFIX vs version précédente :
+  - slam_toolbox ne publie pas de topic pose dédié ("/slam_toolbox/pose"
+    n'existe pas) et rien dans cette stack ne publie sur "/amcl_pose"
+    (pas d'AMCL) -> /api/robot/pose restait bloqué à {0,0,0}.
+    La pose du robot est maintenant lue directement depuis le TF tree
+    (map -> base_link), qui est la source de vérité que slam_toolbox
+    met à jour en continu.
 """
 
 import json
@@ -21,9 +29,12 @@ import threading
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.time import Time
+from rclpy.duration import Duration
 
 from nav_msgs.msg import OccupancyGrid
-from geometry_msgs.msg import PoseStamped
+from tf2_ros import Buffer, TransformListener
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 try:
     from flask import Flask, jsonify
@@ -46,6 +57,9 @@ class SlamServer(Node):
 
         self.rest_port = int(self.declare_parameter('rest_port', 2000).value)
         self.ws_port = int(self.declare_parameter('ws_port', 2001).value)
+        self.map_frame = self.declare_parameter('map_frame', 'map').value
+        self.base_frame = self.declare_parameter('base_frame', 'base_link').value
+        self.pose_poll_rate = float(self.declare_parameter('pose_poll_rate', 10.0).value)
 
         # --- État (protégé par _lock) ---
         self._map = None
@@ -58,10 +72,13 @@ class SlamServer(Node):
         self._ws_clients = set()
         self._ws_lock = threading.Lock()
 
+        # --- TF (source de la pose robot) ---
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.create_timer(1.0 / self.pose_poll_rate, self._update_pose_from_tf)
+
         # --- Abonnements ROS2 ---
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
-        self.create_subscription(PoseStamped, '/amcl_pose', self._on_pose, 10)
-        self.create_subscription(PoseStamped, '/slam_toolbox/pose', self._on_pose, 10)
 
         # --- Démarrer les serveurs ---
         if HAS_FLASK:
@@ -70,7 +87,8 @@ class SlamServer(Node):
             self._start_ws()
 
         self.get_logger().info(
-            f"slam_server initialisé | REST=:{self.rest_port} WS=:{self.ws_port}"
+            f"slam_server initialisé | REST=:{self.rest_port} WS=:{self.ws_port} "
+            f"| pose via TF {self.map_frame}->{self.base_frame}"
         )
 
     # --------------------------------------------------------- ROS callbacks
@@ -80,19 +98,32 @@ class SlamServer(Node):
             self._last_update = time.time()
         self._broadcast({"type": "map", "data": self._map_to_json(msg)})
 
-    def _on_pose(self, msg: PoseStamped):
-        q = msg.pose.pose.orientation
+    def _update_pose_from_tf(self):
+        try:
+            t = self.tf_buffer.lookup_transform(
+                self.map_frame,
+                self.base_frame,
+                Time(),
+                timeout=Duration(seconds=0.05),
+            )
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            # Normal au tout début, tant que slam_toolbox n'a pas encore
+            # publié la transform map->odom (pas d'erreur à logguer en boucle)
+            return
+
+        q = t.transform.rotation
         yaw = math.atan2(
             2.0 * (q.w * q.z + q.x * q.y),
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         )
+        new_pose = {
+            "x": t.transform.translation.x,
+            "y": t.transform.translation.y,
+            "theta": yaw,
+        }
         with self._lock:
-            self._robot_pose = {
-                "x": msg.pose.pose.position.x,
-                "y": msg.pose.pose.position.y,
-                "theta": yaw,
-            }
-        self._broadcast({"type": "pose", "data": self._robot_pose})
+            self._robot_pose = new_pose
+        self._broadcast({"type": "pose", "data": new_pose})
 
     @staticmethod
     def _map_to_json(msg: OccupancyGrid) -> dict:
