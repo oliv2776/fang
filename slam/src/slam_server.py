@@ -34,6 +34,7 @@ from rclpy.time import Time
 from rclpy.duration import Duration
 
 from nav_msgs.msg import OccupancyGrid
+from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
@@ -88,6 +89,12 @@ class SlamServer(Node):
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
         self.create_subscription(Bool, '/safety_stop', self._on_safety_stop, 10)
         self.start_cleaning_pub = self.create_publisher(Bool, '/start_cleaning', 10)
+        self.start_scan_pub = self.create_publisher(Bool, '/start_scan', 10)
+        self.start_explore_pub = self.create_publisher(Bool, '/start_explore', 10)
+        # /cmd_vel : MÊME topic que Nav2 (voir slam_bridge.py::_on_nav2_cmd_vel,
+        # déjà relié jusqu'à SetMotor côté ESP). La téléopération réutilise
+        # tel quel tout le pipeline existant, rien de nouveau côté ESP.
+        self.teleop_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.zone_pub = self.create_publisher(String, '/clean_zone_request', 10)
         self._safety_stop = False
 
@@ -264,6 +271,90 @@ class SlamServer(Node):
             msg.data = True
             self.start_cleaning_pub.publish(msg)
             return jsonify({"status": "cleaning_requested"})
+
+        @app.route('/api/scan/start', methods=['POST'])
+        def start_scan():
+            # Reparcourt la zone déjà connue de la carte SANS activer
+            # brosse/aspirateur - pour mettre à jour la carte après avoir
+            # déplacé des meubles. Nécessite une carte déjà existante :
+            # pour une toute première carte, utilise /api/teleop.
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de démarrer"
+                    }), 409
+                if self._map is None:
+                    return jsonify({
+                        "error": "aucune carte existante - utilise /api/teleop pour la toute première carte"
+                    }), 409
+            msg = Bool()
+            msg.data = True
+            self.start_scan_pub.publish(msg)
+            return jsonify({"status": "scan_requested"})
+
+        @app.route('/api/scan/stop', methods=['POST'])
+        def stop_scan():
+            msg = Bool()
+            msg.data = False
+            self.start_scan_pub.publish(msg)
+            return jsonify({"status": "scan_stop_requested"})
+
+        @app.route('/api/explore/start', methods=['POST'])
+        def start_explore():
+            # Exploration automatique par frontières - contrairement à
+            # /api/scan/start, ne nécessite PAS de carte préexistante (elle
+            # se construit au fur et à mesure). Fonctionne dès qu'au moins
+            # un scan a été reçu.
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de démarrer"
+                    }), 409
+            msg = Bool()
+            msg.data = True
+            self.start_explore_pub.publish(msg)
+            return jsonify({"status": "exploration_requested"})
+
+        @app.route('/api/explore/stop', methods=['POST'])
+        def stop_explore():
+            msg = Bool()
+            msg.data = False
+            self.start_explore_pub.publish(msg)
+            return jsonify({"status": "exploration_stop_requested"})
+
+        @app.route('/api/teleop', methods=['POST'])
+        def teleop():
+            # Téléopération manuelle - pour construire la toute première
+            # carte (pas encore de zone connue à parcourir automatiquement).
+            # Vitesses bridées bas, mêmes raisons que partout ailleurs dans
+            # ce projet (débit capteur lent, ~1-2s entre deux vérifications
+            # sécurité). La sécurité (chocs/vide) reste PLEINEMENT active
+            # pendant la téléopération - contrairement au mode "pause" de
+            # calibrate.py, ceci passe par le round-robin normal côté ESP.
+            MAX_LINEAR = 0.12   # m/s
+            MAX_ANGULAR = 0.5   # rad/s
+
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de continuer"
+                    }), 409
+
+            body = request.get_json(silent=True) or {}
+            try:
+                linear_x = float(body.get("linear_x", 0.0))
+                angular_z = float(body.get("angular_z", 0.0))
+            except (TypeError, ValueError):
+                return jsonify({"error": "linear_x/angular_z doivent être numériques"}), 400
+
+            linear_x = max(-MAX_LINEAR, min(MAX_LINEAR, linear_x))
+            angular_z = max(-MAX_ANGULAR, min(MAX_ANGULAR, angular_z))
+
+            twist = Twist()
+            twist.linear.x = linear_x
+            twist.angular.z = angular_z
+            self.teleop_pub.publish(twist)
+            return jsonify({"status": "ok", "linear_x": linear_x, "angular_z": angular_z})
 
         @app.route('/api/clean/stop', methods=['POST'])
         def stop_cleaning():
