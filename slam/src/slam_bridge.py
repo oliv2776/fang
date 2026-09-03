@@ -81,6 +81,7 @@ from geometry_msgs.msg import Twist, Quaternion
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from tf2_ros import TransformBroadcaster, TransformStamped
+from std_msgs.msg import Bool
 
 try:
     import paho.mqtt.client as mqtt
@@ -137,6 +138,16 @@ class SlamBridge(Node):
         # ferait interférer manuel et autonome sans arbitrage.
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel_manual', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
+
+        # /safety_stop : republie l'état de sécurité lu sur l'ESP32 (chocs,
+        # roue soulevée, vide détecté) pour que coverage_planner.py (et
+        # tout autre nœud Nav2) puisse s'arrêter/annuler ses objectifs.
+        # NOTE : l'arrêt PHYSIQUE réel se fait déjà côté ESP32
+        # (config/comp/gen3.yaml + slam-odom.yaml), indépendamment de ce
+        # topic - ce publisher sert à informer le reste de la stack, pas
+        # à garantir la sécurité elle-même (qui doit rester locale à l'ESP).
+        self.safety_pub = self.create_publisher(Bool, '/safety_stop', 10)
+        self._last_safety_stop = False
 
         # --- Subscriber ROS2 : /cmd_vel produit par Nav2 -> MQTT vers l'ESP ---
         self.cmd_vel_sub = self.create_subscription(
@@ -214,6 +225,7 @@ class SlamBridge(Node):
             client.subscribe(f"{prefix}/wheels", qos=1)
             client.subscribe(f"{prefix}/cmd_vel", qos=1)
             client.subscribe(f"{prefix}/scan", qos=0)
+            client.subscribe(f"{prefix}/safety", qos=1)
             self.get_logger().info(
                 f"MQTT subscribed to {prefix}/{{odom,wheels,cmd_vel,scan}}"
             )
@@ -249,6 +261,8 @@ class SlamBridge(Node):
             self._handle_odom_precomputed(data)
         elif topic.endswith('/cmd_vel'):
             self._handle_cmd_vel(data)
+        elif topic.endswith('/safety'):
+            self._handle_safety(data)
 
     # ------------------------------------------------------------- WebSocket
     def _init_websocket(self):
@@ -452,6 +466,27 @@ class SlamBridge(Node):
         twist.linear.x = float(data.get('linear_x', 0.0))
         twist.angular.z = float(data.get('angular_z', 0.0))
         self.cmd_vel_pub.publish(twist)
+
+    def _handle_safety(self, data: dict):
+        """Reçoit le statut de sécurité publié par l'ESP32 (choc, roue
+        soulevée, vide détecté) et le republie en ROS2. L'arrêt physique
+        réel a déjà eu lieu côté ESP au moment où ce message arrive -
+        c'est purement informatif/pour annulation de trajectoire ici."""
+        stop = bool(data.get('stop', False))
+        if stop and not self._last_safety_stop:
+            self.get_logger().error(
+                f"ARRÊT DE SÉCURITÉ déclenché sur le robot : "
+                f"bump={data.get('bump')} cliff={data.get('cliff')} "
+                f"wheel_extended={data.get('wheel_extended')} — "
+                f"vérifie le robot avant tout réarmement."
+            )
+        elif not stop and self._last_safety_stop:
+            self.get_logger().info("Statut de sécurité redevenu OK côté ESP.")
+        self._last_safety_stop = stop
+
+        msg = Bool()
+        msg.data = stop
+        self.safety_pub.publish(msg)
 
     def _on_nav2_cmd_vel(self, msg: Twist):
         """Reçoit les commandes de vitesse produites par Nav2
