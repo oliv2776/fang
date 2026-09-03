@@ -91,6 +91,8 @@ class SlamServer(Node):
         self.start_cleaning_pub = self.create_publisher(Bool, '/start_cleaning', 10)
         self.start_scan_pub = self.create_publisher(Bool, '/start_scan', 10)
         self.start_explore_pub = self.create_publisher(Bool, '/start_explore', 10)
+        self.return_to_dock_pub = self.create_publisher(Bool, '/return_to_dock', 10)
+        self.set_home_pub = self.create_publisher(Bool, '/set_home_position', 10)
         # /cmd_vel : MÊME topic que Nav2 (voir slam_bridge.py::_on_nav2_cmd_vel,
         # déjà relié jusqu'à SetMotor côté ESP). La téléopération réutilise
         # tel quel tout le pipeline existant, rien de nouveau côté ESP.
@@ -321,6 +323,41 @@ class SlamServer(Node):
             msg.data = False
             self.start_explore_pub.publish(msg)
             return jsonify({"status": "exploration_stop_requested"})
+
+        @app.route('/api/dock/return', methods=['POST'])
+        def dock_return():
+            # ⚠️ Navigation Nav2/SLAM vers la position enregistrée comme
+            # "départ" - PAS le retour au socle natif du Neato (balise
+            # infrarouge, alignement précis sur les contacts de charge).
+            # Amène le robot près du socle, sans garantie de recharge
+            # effective. Voir coverage_planner.py pour le détail.
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de démarrer"
+                    }), 409
+            msg = Bool()
+            msg.data = True
+            self.return_to_dock_pub.publish(msg)
+            return jsonify({"status": "dock_return_requested"})
+
+        @app.route('/api/dock/stop', methods=['POST'])
+        def dock_stop():
+            msg = Bool()
+            msg.data = False
+            self.return_to_dock_pub.publish(msg)
+            return jsonify({"status": "dock_return_stop_requested"})
+
+        @app.route('/api/dock/set_home', methods=['POST'])
+        def dock_set_home():
+            # Redéfinit la position "socle" à la position ACTUELLE du
+            # robot - à utiliser après l'avoir replacé toi-même dessus, si
+            # la capture automatique au démarrage du conteneur ne
+            # correspondait pas à la vraie position du socle.
+            msg = Bool()
+            msg.data = True
+            self.set_home_pub.publish(msg)
+            return jsonify({"status": "home_position_set"})
 
         @app.route('/api/teleop', methods=['POST'])
         def teleop():
