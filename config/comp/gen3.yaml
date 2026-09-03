@@ -37,6 +37,20 @@ esphome:
         - lambda: !lambda |-
             id(uiState).publish_state("Starting...");
 
+            // Amorce TestMode on au démarrage - requis pour SetLDSRotation
+            // ET SetMotor, qui sont tous les deux documentés "(TestMode
+            // Only)" (research/serial.md). Passe par la file d'attente
+            // existante (g_pending_cmd) plutôt qu'un uart.write direct ici,
+            // pour respecter la discipline "un seul écrivain UART" du
+            // round-robin (slam-odom.yaml) - un envoi direct depuis ce
+            // on_boot pourrait sinon se superposer à une commande déjà en
+            // cours et recréer le même genre de corruption qu'on vient de
+            // corriger. Le round-robin réaffirme aussi périodiquement
+            // "TestMode on"/"SetLDSRotation on" (voir slam-odom.yaml,
+            // actions 8 et 9) - cette ligne ne fait que lui donner une
+            // longueur d'avance dès le boot.
+            id(g_pending_cmd) = "TestMode on \n";
+
             ESPTime t = ESPTime::from_epoch_local(id(g_last_cleaning_start_time));
             std::string ts = t.strftime("%Y-%m-%d %H:%M:%S");
             id(last_cleaning_time).publish_state(ts.c_str());
