@@ -55,8 +55,17 @@ substitutions:
   # du round-robin (9 x slam_poll_interval = 4.5s par défaut) + marge.
   setmotor_lookahead_s: "5.0"
 
-  # DOIT rester cohérent avec wheel_base_m dans slam_bridge.py.
-  wheel_base_m: "0.248"
+  # DOIT rester cohérent avec wheel_base_m dans slam_bridge.py (côté
+  # Docker) - après calibration (voir slam/calibrate.py), reporte la
+  # valeur finale aussi dans le paramètre ROS wheel_base_m du bridge.
+  # Cette valeur n'est qu'un POINT DE DÉPART : le vrai réglage vit dans le
+  # global g_cal_wheel_base_m ci-dessous (calibrable à chaud, persisté en
+  # flash), pas dans cette substitution figée à la compilation.
+  wheel_base_m_default: "0.248"
+
+  # Point de départ du seuil de détection de vide, en mm - vrai réglage
+  # dans g_cal_drop_threshold_mm (calibrable à chaud, persisté en flash).
+  drop_threshold_mm_default: "60"
 
   # Vitesse max envoyée à SetMotor, en mm/s - unité non confirmée, gardée
   # volontairement basse (voir avertissement dans le Dockerfile/README).
@@ -126,6 +135,29 @@ globals:
     restore_value: false
     initial_value: 'false'
 
+  # --- Calibration (réglable à chaud via MQTT, persistée en flash) ---
+  # Voir slam/calibrate.py pour la procédure de mesure. Valeurs initiales
+  # = points de départ arbitraires tant qu'aucune calibration n'a été
+  # faite, cf substitutions ci-dessus. restore_value: true -> survit à un
+  # redémarrage de l'ESP32 sans avoir besoin de renvoyer la valeur après
+  # coup (mais PAS après un reflash complet, qui réinitialise la flash).
+  - id: g_cal_drop_threshold_mm
+    type: float
+    restore_value: true
+    initial_value: '${drop_threshold_mm_default}'
+  # Facteur multiplicatif appliqué à la distance commandée à SetMotor pour
+  # compenser un éventuel écart entre distance demandée et distance
+  # réellement parcourue (glissement de roue, calibration encodeur...).
+  # 1.0 = pas de correction (comportement par défaut avant calibration).
+  - id: g_cal_dist_scale
+    type: float
+    restore_value: true
+    initial_value: '1.0'
+  - id: g_cal_wheel_base_m
+    type: float
+    restore_value: true
+    initial_value: '${wheel_base_m_default}'
+
   # --- Commande brosse/aspirateur en attente (injection one-shot) ---
   # Non vide = à envoyer au prochain tour du round-robin, à la place de
   # la commande normalement prévue à ce pas-là.
@@ -151,7 +183,7 @@ text_sensor:
               return true;
             });
 
-  # ---- Réception des commandes brosse/aspirateur + reset sécurité + test ----
+  # ---- Réception des commandes brosse/aspirateur + reset sécurité + test + calibration ----
   # Payloads attendus (texte brut, pas de JSON) :
   #   "clean_on"  -> Clean CleaningEnable  (active brosse+aspirateur)
   #   "clean_off" -> Clean CleaningDisable
@@ -161,6 +193,11 @@ text_sensor:
   #   "raw:<commande>" -> envoie <commande> une seule fois (ex: "raw:GetLDSScan")
   #                       Respecte quand même la file d'attente (n'écrase
   #                       pas une commande déjà en attente).
+  #   "cal:drop_threshold:<mm>"  -> règle g_cal_drop_threshold_mm
+  #   "cal:dist_scale:<facteur>" -> règle g_cal_dist_scale
+  #   "cal:wheel_base:<m>"       -> règle g_cal_wheel_base_m
+  #   Voir slam/calibrate.py pour la procédure guidée qui mesure et envoie
+  #   ces valeurs plutôt que de les deviner.
   #
   # NON VÉRIFIÉ : "Clean CleaningEnable"/"CleaningDisable" viennent de
   # research/hidden-commands.md (doc, pas de capture réelle comme
@@ -191,6 +228,18 @@ text_sensor:
               std::string cmd = x.substr(4) + " \n";
               id(g_pending_cmd) = cmd;
               ESP_LOGW("test", "Commande de test en attente: %s", x.substr(4).c_str());
+            } else if (x.rfind("cal:drop_threshold:", 0) == 0) {
+              float v = atof(x.substr(20).c_str());
+              id(g_cal_drop_threshold_mm) = v;
+              ESP_LOGW("cal", "g_cal_drop_threshold_mm = %.1f mm", v);
+            } else if (x.rfind("cal:dist_scale:", 0) == 0) {
+              float v = atof(x.substr(15).c_str());
+              id(g_cal_dist_scale) = v;
+              ESP_LOGW("cal", "g_cal_dist_scale = %.4f", v);
+            } else if (x.rfind("cal:wheel_base:", 0) == 0) {
+              float v = atof(x.substr(15).c_str());
+              id(g_cal_wheel_base_m) = v;
+              ESP_LOGW("cal", "g_cal_wheel_base_m = %.4f m", v);
             }
 
 script:
@@ -271,13 +320,14 @@ script:
             return;
           }
 
-          float wheel_base = ${wheel_base_m};
+          float wheel_base = id(g_cal_wheel_base_m);
           float v_left  = lin - ang * wheel_base / 2.0f;
           float v_right = lin + ang * wheel_base / 2.0f;
 
           float lookahead = ${setmotor_lookahead_s};
-          long dist_left_mm  = (long)(v_left  * lookahead * 1000.0f);
-          long dist_right_mm = (long)(v_right * lookahead * 1000.0f);
+          float dist_scale = id(g_cal_dist_scale);
+          long dist_left_mm  = (long)(v_left  * lookahead * 1000.0f * dist_scale);
+          long dist_right_mm = (long)(v_right * lookahead * 1000.0f * dist_scale);
 
           float speed = fmaxf(fabsf(v_left), fabsf(v_right)) * 1000.0f;
           float max_speed = ${setmotor_max_speed};
