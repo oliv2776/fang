@@ -140,7 +140,7 @@ SERVER_PID=$!
 echo "[OK] slam_server (PID=$SERVER_PID)"
 
 # --- 6. rosbridge_server (WebSocket ROS2 -> JSON pour le front) ---
-ros2 run rosbridge_server rosbridge_web \
+ros2 run rosbridge_server rosbridge_websocket \
         --ros-args -p port:="${ROSBRIDGE_PORT:-2002}" \
         > /app/logs/rosbridge.log 2>&1 &
 ROSBRIDGE_PID=$!
