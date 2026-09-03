@@ -1,0 +1,201 @@
+# slam/config/nav2_params.yaml
+#
+# Config Nav2 pour Neato D7 gen3.
+#
+# ATTENTION - PAS D'AMCL ICI : slam_toolbox tourne déjà en continu avec
+# le plugin LocalLocalizationSync (mapping + localisation simultanés), il
+# publie déjà la TF map->odom en continu. Ajouter AMCL par-dessus créerait
+# DEUX sources concurrentes de map->odom -> comportement indéfini. Les
+# costmaps se basent directement sur /map (publié par slam_toolbox) et sur
+# la TF existante, pas de map_server/amcl séparés.
+#
+# VITESSES VOLONTAIREMENT TRES BASSES : le scan LiDAR et l'odométrie
+# n'arrivent que toutes les 1-2 secondes sur ce hardware (un seul fil,
+# GetMotor/GetLDSScan/SetMotor en alternance - voir slam-odom.yaml). Le
+# robot est donc "aveugle" pendant potentiellement 1-2s à chaque instant.
+# A 0.08 m/s, ça représente 8-16 cm parcourus à l'aveugle dans le pire cas.
+# NE MONTE PAS ces valeurs sans avoir d'abord amélioré le débit capteur
+# (cf limites connues dans INSTALL.md) - une vitesse plus élevée avec ce
+# débit de mise à jour est un risque de collision réel, pas théorique.
+
+controller_server:
+  ros__parameters:
+    use_sim_time: false
+    controller_frequency: 2.0  # aligné sur le débit réel des capteurs, pas la norme Nav2 (~20Hz)
+    min_x_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.01
+    failure_tolerance: 0.5
+    progress_checker_plugin: "progress_checker"
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.05
+      movement_time_allowance: 30.0  # généreux : un cycle capteur peut prendre plusieurs secondes
+
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.25
+      stateful: true
+
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.08          # cf avertissement ci-dessus - NE PAS AUGMENTER sans raison
+      max_linear_accel: 0.15
+      max_linear_decel: 0.15
+      lookahead_dist: 0.35
+      min_lookahead_dist: 0.25
+      max_lookahead_dist: 0.6
+      lookahead_time: 2.0
+      max_angular_accel: 0.8
+      min_approach_linear_velocity: 0.03
+      approach_velocity_scaling_dist: 0.5
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.6
+      regulated_linear_scaling_min_speed: 0.03
+      use_rotate_to_heading: true
+      rotate_to_heading_angular_vel: 0.4
+      max_angular_vel: 0.4
+      # Tolérance TF augmentée vs défaut Nav2 (0.1s) : nos transforms sont
+      # mises à jour lentement, un défaut serré ferait rejeter en boucle
+      # des transforms pourtant valides mais "vieilles".
+      transform_tolerance: 1.5
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 4
+      height: 4
+      resolution: 0.05
+      robot_radius: 0.20   # rayon URDF (0.18m) + marge
+      transform_tolerance: 1.5
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 0.3
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          # Tolérant : le scan arrive ~1x/1-2s, pas 1x/0.3s comme un
+          # Nav2 "standard" le suppose par défaut.
+          expected_update_rate: 3.0
+          obstacle_max_range: 8.0
+          obstacle_min_range: 0.1
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # Rayon d'inflation généreux : compense les angles morts entre
+        # deux scans (le robot "devine" plus large autour des obstacles
+        # connus pour absorber le fait qu'il ne les revoit pas souvent).
+        inflation_radius: 0.45
+        cost_scaling_factor: 3.0
+      always_send_full_costmap: true
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: false
+      update_frequency: 0.5
+      publish_frequency: 0.5
+      global_frame: map
+      robot_base_frame: base_link
+      robot_radius: 0.20
+      resolution: 0.05
+      track_unknown_space: true
+      transform_tolerance: 1.5
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /map
+        map_subscribe_transient_local: true
+        subscribe_to_updates: true
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        observation_sources: scan
+        scan:
+          topic: /scan
+          max_obstacle_height: 0.3
+          clearing: true
+          marking: true
+          data_type: "LaserScan"
+          expected_update_rate: 3.0
+          obstacle_max_range: 8.0
+          obstacle_min_range: 0.1
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.45
+        cost_scaling_factor: 3.0
+      always_send_full_costmap: true
+
+planner_server:
+  ros__parameters:
+    use_sim_time: false
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.3
+      use_astar: true
+      allow_unknown: true
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: false
+    behavior_plugins: ["spin", "backup", "wait"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+    global_frame: odom
+    robot_base_frame: base_link
+    transform_tolerance: 1.5
+    # Vitesses de récupération elles aussi bridées bas, mêmes raisons.
+    max_rotational_vel: 0.3
+    min_rotational_vel: 0.08
+    rotational_acc_lim: 0.6
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: false
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    transform_tolerance: 1.5
+    # Arbre de comportement par défaut de Nav2 (nav_to_pose), suffisant
+    # pour l'instant - pas de logique de zone custom ici, voir INSTALL.md.
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: false
+    loop_rate: 1.0
+    stop_on_failure: true
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: true
+      waypoint_pause_duration: 0
+
+lifecycle_manager:
+  ros__parameters:
+    use_sim_time: false
+    autostart: true
+    node_names:
+      - controller_server
+      - planner_server
+      - behavior_server
+      - bt_navigator
+      - waypoint_follower
+    bond_timeout: 10.0  # augmenté vs défaut (4s), nos noeuds répondent plus lentement
