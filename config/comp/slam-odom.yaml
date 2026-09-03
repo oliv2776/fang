@@ -72,17 +72,17 @@ substitutions:
   setmotor_max_speed: "80"
 
 mqtt:
-  - id: neato_mqtt
-    broker: ${mqtt_broker}
-    port: ${mqtt_port}
-    # Le Mosquitto intégré à Home Assistant refuse les connexions
-    # anonymes (confirmé côté Docker : erreur "rc=5" dans bridge.log sans
-    # ça). Ajoute ces deux clés dans ton secrets.yaml ESPHome :
-    #   mqtt_username: "ton_utilisateur_mqtt"
-    #   mqtt_password: "son_mot_de_passe"
-    username: !secret mqtt_username
-    password: !secret mqtt_password
-    discovery: false
+  id: neato_mqtt
+  broker: ${mqtt_broker}
+  port: ${mqtt_port}
+  # Le Mosquitto intégré à Home Assistant refuse les connexions
+  # anonymes (confirmé côté Docker : erreur "rc=5" dans bridge.log sans
+  # ça). Ajoute ces deux clés dans ton secrets.yaml ESPHome :
+  #   mqtt_username: "ton_utilisateur_mqtt"
+  #   mqtt_password: "son_mot_de_passe"
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  discovery: false
 
 globals:
   # --- Round-robin ---
