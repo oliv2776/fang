@@ -105,6 +105,17 @@ class NeatoZoneMapCard extends HTMLElement {
           background: rgba(255,255,255,0.3); border-radius: 50%; width: 16px; height: 16px;
           display: flex; align-items: center; justify-content: center; font-size: 0.8em; cursor: pointer;
         }
+        .drive-pad {
+          display: none; grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(3, 48px);
+          gap: 4px; margin: 10px auto; justify-content: center;
+        }
+        .drive-pad.visible { display: grid; }
+        .drive-pad button {
+          font-size: 1.2em; padding: 0; margin: 0; width: 48px; height: 48px;
+          user-select: none; touch-action: none;
+        }
+        .drive-hint { text-align: center; font-size: 0.8em; color: var(--secondary-text-color, #888); display: none; }
+        .drive-hint.visible { display: block; }
       </style>
       <ha-card header="Carte Neato - sélection de zone">
         <div class="safety-banner" id="safetyBanner">
@@ -116,8 +127,27 @@ class NeatoZoneMapCard extends HTMLElement {
           <button id="btnCleanAll" class="secondary">Nettoyer tout</button>
           <button id="btnStop" class="secondary">Arrêter</button>
           <button id="btnDiagnose" class="secondary">Lancer le diagnostic</button>
+          <button id="btnScan" class="secondary">Scanner (maj carte)</button>
+          <button id="btnExplore" class="secondary">Explorer automatiquement</button>
+          <button id="btnToggleDrive" class="secondary">Conduite manuelle</button>
         </div>
         <canvas id="mapCanvas" width="600" height="600"></canvas>
+
+        <div class="drive-pad" id="drivePad">
+          <div></div>
+          <button id="drvUp" title="Avancer">▲</button>
+          <div></div>
+          <button id="drvLeft" title="Tourner à gauche">◄</button>
+          <div></div>
+          <button id="drvRight" title="Tourner à droite">►</button>
+          <div></div>
+          <button id="drvDown" title="Reculer">▼</button>
+          <div></div>
+        </div>
+        <div class="drive-hint" id="driveHint">
+          Maintiens le bouton appuyé pour avancer/tourner - relâche pour arrêter.
+          Vitesse volontairement lente et bridée par le serveur.
+        </div>
 
         <div class="save-form" id="saveForm">
           <input type="text" id="zoneName" placeholder="Nom de la zone (ex: Salon)" maxlength="30" />
@@ -150,6 +180,13 @@ class NeatoZoneMapCard extends HTMLElement {
     this.shadowRoot.getElementById('btnStop').addEventListener('click', () => this._stopCleaning());
     this.shadowRoot.getElementById('btnDiagnose').addEventListener('click', () => this._runDiagnose());
     this.shadowRoot.getElementById('btnSaveZone').addEventListener('click', () => this._saveZone());
+    this.shadowRoot.getElementById('btnScan').addEventListener('click', () => this._startScan());
+    this.shadowRoot.getElementById('btnExplore').addEventListener('click', () => this._startExplore());
+    this.shadowRoot.getElementById('btnToggleDrive').addEventListener('click', () => this._toggleDrivePad());
+    this._wireDriveButton('drvUp', 0.1, 0);
+    this._wireDriveButton('drvDown', -0.1, 0);
+    this._wireDriveButton('drvLeft', 0, 0.4);
+    this._wireDriveButton('drvRight', 0, -0.4);
 
     this._fetchMap();
     this._fetchSafety();
@@ -323,9 +360,90 @@ class NeatoZoneMapCard extends HTMLElement {
     }
   }
 
-  async _stopCleaning() {
+  async _startExplore() {
+    // Exploration automatique par frontières - pas besoin de carte
+    // préexistante, marche dès le premier scan reçu. Aucun nettoyage.
+    this._setStatus('Exploration automatique en cours (pas de nettoyage)...');
     try {
-      await fetch(`${this._apiBase}/api/clean/stop`, { method: 'POST' });
+      const res = await fetch(`${this._apiBase}/api/explore/start`, { method: 'POST' });
+      const data = await res.json();
+      this._setStatus(res.ok ? 'Exploration lancée' : `Erreur: ${data.error || res.status}`);
+    } catch (e) {
+      this._setStatus(`Erreur d'envoi: ${e.message}`);
+    }
+  }
+
+  async _startScan() {
+    // Reparcourt la carte déjà connue SANS activer brosse/aspirateur -
+    // pour mettre à jour la carte après avoir déplacé des meubles.
+    // Ne fonctionne pas s'il n'y a aucune carte du tout (voir _toggleDrivePad
+    // pour la toute première carte).
+    this._setStatus('Scan (sans aspirer) en cours...');
+    try {
+      const res = await fetch(`${this._apiBase}/api/scan/start`, { method: 'POST' });
+      const data = await res.json();
+      this._setStatus(res.ok ? 'Scan lancé (pas de nettoyage)' : `Erreur: ${data.error || res.status}`);
+    } catch (e) {
+      this._setStatus(`Erreur d'envoi: ${e.message}`);
+    }
+  }
+
+  _toggleDrivePad() {
+    const pad = this.shadowRoot.getElementById('drivePad');
+    const hint = this.shadowRoot.getElementById('driveHint');
+    const visible = pad.classList.toggle('visible');
+    hint.classList.toggle('visible', visible);
+    if (!visible) this._sendTeleop(0, 0); // sécurité : coupe si on referme pendant un appui
+  }
+
+  _wireDriveButton(id, linearX, angularZ) {
+    const btn = this.shadowRoot.getElementById(id);
+    let interval = null;
+
+    const start = (e) => {
+      e.preventDefault();
+      if (this._safetyStop) return;
+      this._sendTeleop(linearX, angularZ);
+      interval = setInterval(() => this._sendTeleop(linearX, angularZ), 600);
+    };
+    const stop = () => {
+      if (interval) { clearInterval(interval); interval = null; }
+      this._sendTeleop(0, 0);
+    };
+
+    btn.addEventListener('pointerdown', start);
+    btn.addEventListener('pointerup', stop);
+    btn.addEventListener('pointerleave', stop);
+    btn.addEventListener('pointercancel', stop);
+  }
+
+  async _sendTeleop(linearX, angularZ) {
+    try {
+      const res = await fetch(`${this._apiBase}/api/teleop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ linear_x: linearX, angular_z: angularZ }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        this._setStatus(`Conduite: ${data.error || res.status}`);
+      }
+    } catch (e) {
+      this._setStatus(`Erreur conduite: ${e.message}`);
+    }
+  }
+
+  async _stopCleaning() {
+    // Un seul bouton "Arrêter" pour tout : nettoyage, scan et exploration
+    // vivent dans des états séparés côté coverage_planner (topics
+    // différents), donc on coupe les trois plutôt que de forcer
+    // l'utilisateur à savoir lequel est actif.
+    try {
+      await Promise.all([
+        fetch(`${this._apiBase}/api/clean/stop`, { method: 'POST' }),
+        fetch(`${this._apiBase}/api/scan/stop`, { method: 'POST' }),
+        fetch(`${this._apiBase}/api/explore/stop`, { method: 'POST' }),
+      ]);
       this._setStatus('Arrêt demandé');
     } catch (e) {
       this._setStatus(`Erreur d'envoi: ${e.message}`);
