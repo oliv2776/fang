@@ -33,6 +33,7 @@ from rclpy.time import Time
 from rclpy.duration import Duration
 
 from nav_msgs.msg import OccupancyGrid
+from std_msgs.msg import Bool
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
@@ -79,6 +80,9 @@ class SlamServer(Node):
 
         # --- Abonnements ROS2 ---
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
+        self.create_subscription(Bool, '/safety_stop', self._on_safety_stop, 10)
+        self.start_cleaning_pub = self.create_publisher(Bool, '/start_cleaning', 10)
+        self._safety_stop = False
 
         # --- Démarrer les serveurs ---
         if HAS_FLASK:
@@ -97,6 +101,11 @@ class SlamServer(Node):
             self._map = msg
             self._last_update = time.time()
         self._broadcast({"type": "map", "data": self._map_to_json(msg)})
+
+    def _on_safety_stop(self, msg: Bool):
+        with self._lock:
+            self._safety_stop = msg.data
+        self._broadcast({"type": "safety_stop", "data": {"stop": msg.data}})
 
     def _update_pose_from_tf(self):
         try:
@@ -190,6 +199,30 @@ class SlamServer(Node):
                 with open(filename, 'w') as f:
                     json.dump(self._map_to_json(self._map), f, indent=2)
             return jsonify({"status": "saved", "file": filename})
+
+        @app.route('/api/safety')
+        def safety():
+            with self._lock:
+                return jsonify({"stop": self._safety_stop})
+
+        @app.route('/api/clean/start', methods=['POST'])
+        def start_cleaning():
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de démarrer"
+                    }), 409
+            msg = Bool()
+            msg.data = True
+            self.start_cleaning_pub.publish(msg)
+            return jsonify({"status": "cleaning_requested"})
+
+        @app.route('/api/clean/stop', methods=['POST'])
+        def stop_cleaning():
+            msg = Bool()
+            msg.data = False
+            self.start_cleaning_pub.publish(msg)
+            return jsonify({"status": "cleaning_stop_requested"})
 
         t = threading.Thread(
             target=lambda: app.run(host='0.0.0.0', port=self.rest_port, debug=False),
