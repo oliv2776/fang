@@ -80,7 +80,7 @@ class CoveragePlanner(Node):
             self.declare_parameter('coverage_mark_radius_m', self.row_spacing_m / 2).value
         )
 
-        self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.126').value
+        self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.108').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
         self.mqtt_clean_cmd_topic = self.declare_parameter(
             'mqtt_clean_cmd_topic', 'neato/robot/clean_cmd'
