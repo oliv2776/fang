@@ -117,6 +117,26 @@ globals:
     restore_value: false
     initial_value: 'false'
 
+  # --- Synchronisation requête/réponse ---
+  # true = une commande vient d'être envoyée, sa réponse complète n'est
+  # PAS encore arrivée (voir gen3.yaml, qui repasse ce flag à false dès
+  # qu'un \x1A de fin de réponse est détecté). Le round-robin doit
+  # attendre que ce flag repasse à false avant d'envoyer la commande
+  # suivante - sans ça, une réponse longue (GetLDSScan, ~1.5s) se fait
+  # interrompre par la commande suivante envoyée 500ms plus tard par le
+  # timer, corrompant les deux flux sur le fil UART partagé.
+  - id: g_awaiting_response
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  # Horodatage (ms) du dernier envoi - sert à détecter une réponse
+  # jamais arrivée (perdue/tronquée) et à forcer la reprise plutôt que
+  # de rester bloqué indéfiniment (ça couperait aussi la sécurité).
+  - id: g_awaiting_response_since_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
   # --- cmd_vel (Nav2 -> MQTT -> SetMotor) ---
   - id: g_cmd_linear_x
     type: float
@@ -299,6 +319,27 @@ script:
             return;
           }
 
+          // ---- Attente de la fin de la réponse précédente ----
+          // Sans ça, une réponse longue (GetLDSScan, ~1.5s) se fait
+          // interrompre par la commande suivante envoyée 500ms plus tard
+          // par le timer, corrompant les deux flux sur le fil UART
+          // partagé (confirmé sur robot réel). g_awaiting_response
+          // repasse à false dans gen3.yaml dès qu'un \x1A de fin de
+          // réponse est détecté.
+          if (id(g_awaiting_response)) {
+            uint32_t waited = millis() - id(g_awaiting_response_since_ms);
+            if (waited < 3000) {
+              // Pas encore de réponse complète, on attend le prochain tick.
+              return;
+            }
+            // Timeout : la réponse précédente n'est jamais arrivée
+            // (perdue/tronquée) - on force la reprise plutôt que de
+            // rester bloqué indéfiniment (ça couperait aussi la
+            // surveillance sécurité).
+            ESP_LOGW("uart_parser", "Timeout en attente de reponse UART (%u ms), on force la reprise", waited);
+            id(g_awaiting_response) = false;
+          }
+
           int step = id(g_slam_poll_step);
           id(g_slam_poll_step) = (step + 1) % 18;
           int action = SEQ[step];
@@ -309,36 +350,52 @@ script:
           // sécurité ne doit jamais être retardée par une commande de
           // confort comme activer la brosse.
           if (!id(g_pending_cmd).empty() && action != 0 && action != 1) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str(id(g_pending_cmd).c_str());
             id(g_pending_cmd) = "";
             return;
           }
 
           if (action == 0) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetDigitalSensors \n");
             return;
           }
           if (action == 1) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetAnalogSensors \n");
             return;
           }
           if (action == 3) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetMotor \n");
             return;
           }
           if (action == 4) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetLDSScan \n");
             return;
           }
           if (action == 5) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetErr \n");
             return;
           }
           if (action == 6) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetState \n");
             return;
           }
           if (action == 7) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetCharger \n");
             return;
           }
@@ -351,6 +408,8 @@ script:
           // Priorité absolue à l'arrêt d'urgence latché, quel que soit
           // l'état de cmd_vel.
           if (id(g_safety_stop) || stale) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
             return;
           }
@@ -359,6 +418,8 @@ script:
           float ang = id(g_cmd_angular_z);
 
           if (fabsf(lin) < 0.005f && fabsf(ang) < 0.01f) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
             return;
           }
@@ -382,6 +443,8 @@ script:
                               "SetMotor RWheelDist %ld LWheelDist %ld Speed %d \n",
                               dist_right_mm, dist_left_mm, (int) speed);
           if (len > 0 && len < (int) sizeof(cmd)) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str(cmd);
           }
 
