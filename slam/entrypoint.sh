@@ -7,7 +7,7 @@ echo "  Neato Brainslug - SLAM Container"
 echo "  Robot: Neato D7 (gen3, LiDAR 360)"
 echo "=========================================="
 echo "ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}"
-echo "MQTT_BROKER=${MQTT_BROKER:-192.168.10.126}:${MQTT_PORT:-1883}"
+echo "MQTT_BROKER=${MQTT_BROKER:-192.168.10.108}:${MQTT_PORT:-1883}"
 echo "SLAM_MODE=${SLAM_MODE:-mapping}"
 echo "ROBOT_TYPE=${ROBOT_TYPE:-d7_gen3}"
 echo "REST_PORT=${REST_PORT:-2000}"
@@ -121,7 +121,7 @@ if [ "${NAV2_ENABLED:-false}" = "true" ]; then
     # --- coverage_planner (couverture zigzag + brosse/aspirateur) ---
     python3 /app/src/coverage_planner.py \
             --ros-args \
-            -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+            -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
             -p mqtt_port:="${MQTT_PORT:-1883}" \
             -p mqtt_clean_cmd_topic:="${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}" \
             -p robot_radius_m:="${ROBOT_RADIUS_M:-0.168}" \
@@ -135,7 +135,7 @@ fi
 #         ROS2 /cmd_vel (Nav2) -> MQTT vers l'ESP32) ---
 python3 /app/src/slam_bridge.py \
         --ros-args \
-        -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+        -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
         -p mqtt_port:="${MQTT_PORT:-1883}" \
         -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
         -p ws_port:="${WS_IN_PORT:-2003}" \
@@ -149,7 +149,7 @@ python3 /app/src/slam_server.py \
         --ros-args \
         -p rest_port:="${REST_PORT:-2000}" \
         -p ws_port:="${WS_PORT:-2001}" \
-        -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+        -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
         -p mqtt_port:="${MQTT_PORT:-1883}" \
         -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
         > /app/logs/server.log 2>&1 &
@@ -226,7 +226,7 @@ while true; do
         echo "[WARN] slam_bridge mort, relance..."
         python3 /app/src/slam_bridge.py \
                 --ros-args \
-                -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+                -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
                 -p mqtt_port:="${MQTT_PORT:-1883}" \
                 -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
                 -p ws_port:="${WS_IN_PORT:-2003}" \
@@ -242,7 +242,7 @@ while true; do
                 --ros-args \
                 -p rest_port:="${REST_PORT:-2000}" \
                 -p ws_port:="${WS_PORT:-2001}" \
-                -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+                -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
                 -p mqtt_port:="${MQTT_PORT:-1883}" \
                 -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
                 > /app/logs/server.log 2>&1 &
@@ -306,7 +306,7 @@ while true; do
             echo "[WARN] coverage_planner mort, relance..."
             python3 /app/src/coverage_planner.py \
                     --ros-args \
-                    -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
+                    -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
                     -p mqtt_port:="${MQTT_PORT:-1883}" \
                     -p mqtt_clean_cmd_topic:="${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}" \
                     -p robot_radius_m:="${ROBOT_RADIUS_M:-0.168}" \
