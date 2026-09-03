@@ -67,6 +67,8 @@ class SlamServer(Node):
         self.pose_poll_rate = float(self.declare_parameter('pose_poll_rate', 10.0).value)
         self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.108').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
+        self.mqtt_username = self.declare_parameter('mqtt_username', '').value
+        self.mqtt_password = self.declare_parameter('mqtt_password', '').value
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
 
         # --- État (protégé par _lock) ---
@@ -514,7 +516,8 @@ class SlamServer(Node):
             # le téléchargement. Ne teste JAMAIS SetMotor (voir diagnostics.py).
             fmt = request.args.get('format', 'md')
             report = diagnostics.run_diagnostics(
-                self.mqtt_broker, self.mqtt_port, self.mqtt_prefix
+                self.mqtt_broker, self.mqtt_port, self.mqtt_prefix,
+                self.mqtt_username, self.mqtt_password
             )
             filename_ts = time.strftime('%Y%m%d_%H%M%S')
 
