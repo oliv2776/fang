@@ -129,7 +129,8 @@ class NeatoZoneMapCard extends HTMLElement {
           <button id="btnDiagnose" class="secondary">Lancer le diagnostic</button>
           <button id="btnScan" class="secondary">Scanner (maj carte)</button>
           <button id="btnExplore" class="secondary">Explorer automatiquement</button>
-          <button id="btnDock" class="secondary">Retour au socle</button>
+          <button id="btnDockNative">Retour au socle (natif, recommandé)</button>
+          <button id="btnDock" class="secondary">Retour au socle (Nav2 approximatif)</button>
           <button id="btnToggleDrive" class="secondary">Conduite manuelle</button>
         </div>
         <canvas id="mapCanvas" width="600" height="600"></canvas>
@@ -183,6 +184,7 @@ class NeatoZoneMapCard extends HTMLElement {
     this.shadowRoot.getElementById('btnSaveZone').addEventListener('click', () => this._saveZone());
     this.shadowRoot.getElementById('btnScan').addEventListener('click', () => this._startScan());
     this.shadowRoot.getElementById('btnExplore').addEventListener('click', () => this._startExplore());
+    this.shadowRoot.getElementById('btnDockNative').addEventListener('click', () => this._returnToDockNative());
     this.shadowRoot.getElementById('btnDock').addEventListener('click', () => this._returnToDock());
     this.shadowRoot.getElementById('btnToggleDrive').addEventListener('click', () => this._toggleDrivePad());
     this._wireDriveButton('drvUp', 0.1, 0);
@@ -375,6 +377,29 @@ class NeatoZoneMapCard extends HTMLElement {
     }
   }
 
+  async _returnToDockNative() {
+    // Utilise la balise infrarouge native du Neato (mode "Clean House")
+    // - marche depuis n'importe où, alignement de charge précis. Mais
+    // réactive brièvement brosse+aspirateur : contrainte du protocole
+    // Neato (House et CleaningDisable sont mutuellement exclusifs),
+    // aucun moyen de l'éviter.
+    const confirmed = confirm(
+      'Le retour au socle natif réactive brièvement la brosse et ' +
+      "l'aspirateur (contrainte du protocole Neato, pas évitable). " +
+      'Continuer ?'
+    );
+    if (!confirmed) return;
+
+    this._setStatus('Retour au socle natif en cours (brosse/aspirateur brièvement actifs)...');
+    try {
+      const res = await fetch(`${this._apiBase}/api/dock/native`, { method: 'POST' });
+      const data = await res.json();
+      this._setStatus(res.ok ? 'Retour au socle natif lancé' : `Erreur: ${data.error || res.status}`);
+    } catch (e) {
+      this._setStatus(`Erreur d'envoi: ${e.message}`);
+    }
+  }
+
   async _returnToDock() {
     // ⚠️ Navigation approximative vers la position de départ, PAS le
     // retour au socle natif du Neato (pas d'alignement précis sur les
@@ -460,6 +485,7 @@ class NeatoZoneMapCard extends HTMLElement {
         fetch(`${this._apiBase}/api/scan/stop`, { method: 'POST' }),
         fetch(`${this._apiBase}/api/explore/stop`, { method: 'POST' }),
         fetch(`${this._apiBase}/api/dock/stop`, { method: 'POST' }),
+        fetch(`${this._apiBase}/api/dock/native/stop`, { method: 'POST' }),
       ]);
       this._setStatus('Arrêt demandé');
     } catch (e) {
