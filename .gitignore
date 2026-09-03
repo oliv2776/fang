@@ -132,3 +132,4 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+.aider*
