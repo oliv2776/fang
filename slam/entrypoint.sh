@@ -123,6 +123,8 @@ if [ "${NAV2_ENABLED:-false}" = "true" ]; then
             --ros-args \
             -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
             -p mqtt_port:="${MQTT_PORT:-1883}" \
+            -p mqtt_username:="${MQTT_USERNAME:-}" \
+            -p mqtt_password:="${MQTT_PASSWORD:-}" \
             -p mqtt_clean_cmd_topic:="${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}" \
             -p robot_radius_m:="${ROBOT_RADIUS_M:-0.168}" \
             -p row_spacing_m:="${ROW_SPACING_M:-0.234}" \
@@ -137,6 +139,8 @@ python3 /app/src/slam_bridge.py \
         --ros-args \
         -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
         -p mqtt_port:="${MQTT_PORT:-1883}" \
+        -p mqtt_username:="${MQTT_USERNAME:-}" \
+        -p mqtt_password:="${MQTT_PASSWORD:-}" \
         -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
         -p ws_port:="${WS_IN_PORT:-2003}" \
         -p cmd_vel_out_topic:="${CMD_VEL_OUT_TOPIC:-neato/robot/cmd_vel_out}" \
@@ -151,6 +155,8 @@ python3 /app/src/slam_server.py \
         -p ws_port:="${WS_PORT:-2001}" \
         -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
         -p mqtt_port:="${MQTT_PORT:-1883}" \
+        -p mqtt_username:="${MQTT_USERNAME:-}" \
+        -p mqtt_password:="${MQTT_PASSWORD:-}" \
         -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
         > /app/logs/server.log 2>&1 &
 SERVER_PID=$!
@@ -228,6 +234,8 @@ while true; do
                 --ros-args \
                 -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
                 -p mqtt_port:="${MQTT_PORT:-1883}" \
+                -p mqtt_username:="${MQTT_USERNAME:-}" \
+                -p mqtt_password:="${MQTT_PASSWORD:-}" \
                 -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
                 -p ws_port:="${WS_IN_PORT:-2003}" \
                 -p cmd_vel_out_topic:="${CMD_VEL_OUT_TOPIC:-neato/robot/cmd_vel_out}" \
@@ -244,6 +252,8 @@ while true; do
                 -p ws_port:="${WS_PORT:-2001}" \
                 -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
                 -p mqtt_port:="${MQTT_PORT:-1883}" \
+                -p mqtt_username:="${MQTT_USERNAME:-}" \
+                -p mqtt_password:="${MQTT_PASSWORD:-}" \
                 -p mqtt_prefix:="${MQTT_PREFIX:-neato/robot}" \
                 > /app/logs/server.log 2>&1 &
         SERVER_PID=$!
@@ -308,6 +318,8 @@ while true; do
                     --ros-args \
                     -p mqtt_broker:="${MQTT_BROKER:-192.168.10.108}" \
                     -p mqtt_port:="${MQTT_PORT:-1883}" \
+                    -p mqtt_username:="${MQTT_USERNAME:-}" \
+                    -p mqtt_password:="${MQTT_PASSWORD:-}" \
                     -p mqtt_clean_cmd_topic:="${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}" \
                     -p robot_radius_m:="${ROBOT_RADIUS_M:-0.168}" \
                     -p row_spacing_m:="${ROW_SPACING_M:-0.234}" \
