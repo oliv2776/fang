@@ -215,13 +215,15 @@ uart:
     direction: RX
     after:
       bytes: 0
-      delimiter: "\x1A"
+      # Ligne par ligne (au lieu d'attendre le \x1A de fin de reponse en une
+      # seule fois) : evite le crash documente dans
+      # research/command-experiments.md quand la reponse est volumineuse
+      # (GetLDSScan ~360 lignes). Voir le commentaire au debut de la lambda
+      # ci-dessous pour l'accumulation manuelle des lignes d'une meme reponse.
+      delimiter: "\n"
     sequence:
       - lambda: !lambda |-
           UARTDebug::log_string(direction, bytes);
-
-          // convert bytes -> std::string
-          std::string str(bytes.begin(), bytes.end());
 
           // ---- TRIM FUNCTION ----
           auto trim = [](std::string &s) {
@@ -238,23 +240,52 @@ uart:
               return static_cast<uint32_t>(strtoul(hex.c_str(), nullptr, 16));
           };
 
-          // ---- SPLIT ON CRLF ----
-          std::vector<std::string> lines;
-          size_t start = 0;
-          size_t end = 0;
+          // ---- ACCUMULATION LIGNE PAR LIGNE D'UNE REPONSE COMPLETE ----
+          // Le trigger se declenche maintenant a chaque "\n" recu (voir
+          // "after:" ci-dessus) au lieu d'attendre le \x1A de fin de
+          // reponse d'un coup : necessaire pour GetLDSScan (~360 lignes)
+          // qui plantait l'ESP en mode "buffer complet" (cf
+          // research/command-experiments.md). On reconstitue donc la
+          // reponse complete nous-memes dans un buffer statique entre
+          // deux appels de cette lambda.
+          //
+          // Le robot termine une reponse complete par un octet \x1A
+          // colle a la fin de la derniere ligne de contenu (pas de \r\n
+          // avant), donc il n'arrive PAS via son propre trigger "\n" :
+          // il est livre au debut du PROCHAIN chunk de ligne recu (celui
+          // de la prochaine commande). On le detecte donc en tete de
+          // chunk, pas en fin.
+          static std::vector<std::string> line_buf;
 
-          while ((end = str.find("\r\n", start)) != std::string::npos) {
-            std::string line = str.substr(start, end - start);
-            trim(line);
-            if (!line.empty()) lines.push_back(line);
-            start = end + 2;
+          std::string chunk(bytes.begin(), bytes.end());
+
+          // Un \x1A en tete de ce chunk = fin de la reponse precedente.
+          // On finalise cette reponse-la AVANT de traiter le reste du
+          // chunk courant (qui, lui, appartient a la reponse suivante).
+          size_t ctrl_z_pos = chunk.find('\x1A');
+          std::string remainder;
+          bool have_terminator = (ctrl_z_pos != std::string::npos);
+          if (have_terminator) {
+            remainder = chunk.substr(ctrl_z_pos + 1);
+            chunk = chunk.substr(0, ctrl_z_pos);
           }
 
-          if (start < str.size()) {
-            std::string last = str.substr(start);
-            trim(last);
-            if (!last.empty()) lines.push_back(last);
+          trim(chunk);
+          if (!chunk.empty()) line_buf.push_back(chunk);
+
+          if (!have_terminator) {
+            // Reponse pas encore terminee, on attend la suite.
+            return;
           }
+
+          // ---- REPONSE COMPLETE : on dispatch sur les lignes accumulees ----
+          std::vector<std::string> lines = line_buf;
+          line_buf.clear();
+
+          // S'il restait du texte apres le \x1A (deja le debut de la
+          // prochaine reponse), on ne le perd pas : on le remet en attente.
+          trim(remainder);
+          if (!remainder.empty()) line_buf.push_back(remainder);
 
           if (lines.empty()) return;
 
@@ -399,6 +430,89 @@ uart:
                     false  // retain = false
                 );
               }
+            }
+          }
+
+          // ---- SLAM: GetLDSScan -> publie le scan LiDAR en MQTT (JSON) ----
+          // IMPORTANT - non verifie sur un vrai robot :
+          // Contrairement a GetMotor (capture reelle disponible dans
+          // research/command-experiments.md), je n'ai trouve aucune capture
+          // reelle de "GetLDSScan" dans ce repo. Le parsing ci-dessous
+          // suppose le format habituellement documente pour cette commande
+          // sur le port debug Neato (PAS le format binaire brut du capteur
+          // LDS lui-meme, qui necessiterait un second fil direct sur le
+          // module - confirme absent ici, un seul fil vers le port debug) :
+          //
+          //   GetLDSScan
+          //   AngleInDegrees,DistInMM,Intensity,ErrorCode
+          //   0,543,84,0
+          //   1,542,87,0
+          //   ...
+          //   359,540,90,0
+          //   ROTATION_SPEED,300
+          //
+          // A VALIDER : flashe, lance "GetLDSScan" en TestMode, et compare
+          // les logs uart_debug reels a ce format avant de faire confiance
+          // aux donnees publiees. Si l'ordre des colonnes differe, ajuste
+          // l'indice ci-dessous (angle_deg = colonne 0, dist_mm = colonne 1).
+          else if (command == "GetLDSScan") {
+            // 360 mesures max (une par degre). inf = pas de retour valide.
+            static float ranges_m[360];
+            static bool got_point[360];
+            for (int i = 0; i < 360; i++) { ranges_m[i] = INFINITY; got_point[i] = false; }
+
+            for (size_t i = 1; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              if (line.empty()) continue;
+              // On ignore la ligne d'entete (non numerique) et le footer
+              // ROTATION_SPEED (pas une mesure d'angle).
+              if (!std::isdigit(static_cast<unsigned char>(line[0]))) continue;
+
+              // Split manuel sur ','
+              size_t p1 = line.find(',');
+              if (p1 == std::string::npos) continue;
+              size_t p2 = line.find(',', p1 + 1);
+              std::string angle_str = line.substr(0, p1);
+              std::string dist_str = (p2 == std::string::npos)
+                  ? line.substr(p1 + 1)
+                  : line.substr(p1 + 1, p2 - p1 - 1);
+
+              int angle_deg = atoi(angle_str.c_str());
+              int dist_mm = atoi(dist_str.c_str());
+
+              if (angle_deg < 0 || angle_deg >= 360) continue;
+              if (dist_mm <= 0) continue;  // 0 = pas de retour valide
+
+              ranges_m[angle_deg] = dist_mm / 1000.0f;
+              got_point[angle_deg] = true;
+            }
+
+            // ---- Construction du JSON ----
+            // Taille max : "inf," ou "8.123," * 360 + accolades ~ 3.5KB,
+            // largement sous la limite MQTT par defaut (256KB).
+            static char json_buf[4096];
+            size_t pos = 0;
+            pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "{\"ranges\":[");
+            for (int i = 0; i < 360 && pos < sizeof(json_buf) - 16; i++) {
+              if (got_point[i]) {
+                pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "%.3f", ranges_m[i]);
+              } else {
+                pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "null");
+              }
+              if (i < 359) pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, ",");
+            }
+            pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
+                             "],\"angle_min\":0.0,\"angle_max\":6.2657,"
+                             "\"angle_increment\":0.017453,\"timestamp\":%.3f}",
+                             millis() / 1000.0);
+
+            if (pos > 0 && pos < sizeof(json_buf)) {
+              id(neato_mqtt).publish(
+                  "${mqtt_scan_topic}",
+                  std::string(json_buf, pos),
+                  0,
+                  false
+              );
             }
           }
 
