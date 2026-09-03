@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-rosbridge-server \
         ros-humble-std-srvs \
         ros-humble-visualization-msgs \
-        ros-humble-map-server \
+        ros-humble-nav2-map-server \
         ros-humble-navigation2 \
         ros-humble-nav2-bringup \
         ros-humble-nav2-regulated-pure-pursuit-controller \
