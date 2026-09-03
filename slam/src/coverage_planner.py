@@ -119,6 +119,20 @@ class CoveragePlanner(Node):
         self._dock_goal_handle = None
         self.create_timer(1.0, self._maybe_capture_home_pose)
 
+        # --- Retour au socle NATIF (recommandé) ---
+        # Utilise la balise infrarouge du socle via le mode "Clean House"
+        # natif du Neato (fonctionnalité v1 stable, cf status.md) - marche
+        # depuis n'importe où dans le rayon de la balise, pas besoin de
+        # rapprocher le robot au préalable avec Nav2. Contrainte du
+        # protocole Neato : "House" et "CleaningDisable" sont mutuellement
+        # exclusifs (cf research/hidden-commands.md), donc IMPOSSIBLE
+        # d'obtenir la navigation native sans réactiver brièvement brosse
+        # + aspirateur - aucun moyen de contourner ça, ce n'est pas une
+        # limitation de ce code mais du firmware Neato lui-même.
+        self.native_dock_min_charge = int(self.declare_parameter('native_dock_min_charge', 90).value)
+        self._native_docking = False
+        self.create_subscription(Bool, '/dock_native_request', self._on_dock_native, 10)
+
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
         self.create_subscription(Bool, '/safety_stop', self._on_safety_stop, 10)
         self.create_subscription(Bool, '/start_cleaning', self._on_start_cleaning, 10)
@@ -167,6 +181,17 @@ class CoveragePlanner(Node):
             )
         except Exception as e:
             self.get_logger().warn(f"Échec publish clean_cmd: {e}")
+
+    def _send_raw_command(self, text: str):
+        """Envoie une commande MQTT brute (topic clean_cmd), réutilisant
+        le mécanisme raw:/pause_polling/resume_polling déjà géré côté ESP
+        dans config/comp/slam-odom.yaml."""
+        if self._mqtt_client is None:
+            return
+        try:
+            self._mqtt_client.publish(self.mqtt_clean_cmd_topic, text, qos=1)
+        except Exception as e:
+            self.get_logger().warn(f"Échec publish commande brute '{text}': {e}")
 
     # --------------------------------------------------------------- ROS callbacks
     def _on_map(self, msg: OccupancyGrid):
@@ -235,7 +260,7 @@ class CoveragePlanner(Node):
             self._stop_exploration()
 
     def _start_exploration(self):
-        if self._running or self._exploring or self._docking:
+        if self._running or self._exploring or self._docking or self._native_docking:
             self.get_logger().warn("Un cycle est déjà en cours, ignoré")
             return
         self._exploring = True
@@ -303,7 +328,7 @@ class CoveragePlanner(Node):
         if not msg.data:
             self._abort_docking()
             return
-        if self._running or self._exploring or self._docking:
+        if self._running or self._exploring or self._docking or self._native_docking:
             self.get_logger().warn("Un cycle est déjà en cours, ignoré")
             return
         if self._safety_stop:
@@ -373,6 +398,51 @@ class CoveragePlanner(Node):
             except Exception as e:
                 self.get_logger().warn(f"Échec annulation retour au socle: {e}")
         self._dock_goal_handle = None
+
+    def _on_dock_native(self, msg: Bool):
+        """Retour au socle NATIF : pause notre round-robin (GetMotor/
+        GetLDSScan/SetMotor - pour ne pas interférer avec la navigation
+        interne du Neato le temps qu'elle tourne), puis déclenche
+        "Clean House" avec un MinCharge élevé pour l'inciter à rentrer
+        se recharger plutôt qu'à explorer longuement.
+
+        ⚠️ Réactive brièvement brosse+aspirateur (contrainte du protocole
+        Neato, voir commentaire dans __init__ - pas contournable).
+        ⚠️ Pendant que ce mode tourne, NOTRE surveillance de sécurité est
+        en pause (round-robin arrêté) - le Neato utilise SA PROPRE
+        sécurité native à la place, ce qui est normal et attendu pour ce
+        mode (il n'a pas besoin de notre supervision pour naviguer avec
+        son propre firmware). Pense à cliquer "Arrêter" (ou envoyer
+        resume_polling) si tu veux reprendre le contrôle SLAM/Nav2 avant
+        que le Neato ait fini de rentrer tout seul.
+        """
+        if not msg.data:
+            self._native_docking = False
+            self._send_raw_command("resume_polling")
+            return
+
+        if self._running or self._exploring or self._docking or self._native_docking:
+            self.get_logger().warn("Un cycle est déjà en cours, ignoré")
+            return
+        if self._safety_stop:
+            self.get_logger().error(
+                "Retour au socle natif refusé : safety_stop actif. Vérifie "
+                "le robot et réarme-le avant de relancer."
+            )
+            return
+
+        self._native_docking = True
+        self.get_logger().info(
+            f"Retour au socle NATIF : pause du round-robin, puis "
+            f"'Clean House MinCharge {self.native_dock_min_charge}' - "
+            f"brosse/aspirateur vont brièvement se réactiver (contrainte "
+            f"du protocole Neato, pas évitable)."
+        )
+        self._send_raw_command("pause_polling")
+        threading.Timer(
+            1.0,
+            lambda: self._send_raw_command(f"raw:Clean House MinCharge {self.native_dock_min_charge}"),
+        ).start()
 
     def _is_blacklisted(self, frontier, radius_m=0.5):
         for b in self._explore_blacklist:
@@ -575,7 +645,7 @@ class CoveragePlanner(Node):
 
     # ------------------------------------------------------------- Cycle nettoyage
     def _start_cleaning(self, polygon=None, scan_only=False):
-        if self._running or self._exploring or self._docking:
+        if self._running or self._exploring or self._docking or self._native_docking:
             self.get_logger().warn("Un cycle est déjà en cours, ignoré")
             return
 
