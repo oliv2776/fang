@@ -4,26 +4,59 @@ slam_bridge.py
 Reçoit les données du robot Neato D7 gen3 (via MQTT ou WebSocket) et les publie
 en topics ROS2 pour slam_toolbox.
 
-Le D7 gen3 a un LiDAR 360° (RPLiDAR A1 ou équivalent) :
-    - ~720 points par scan (résolution 0.5°)
-    - Range : 0.1m à 8m
-    - Fréquence : ~10-15 Hz
+--------------------------------------------------------------------------
+LiDAR (format BINAIRE réel publié par le composant ESPHome neato_lidar) :
+--------------------------------------------------------------------------
+Topic MQTT (mqtt_topic du composant neato_lidar, ex: "neato/scan" ou
+"neato/<device_id>/scan") -> payload binaire :
 
-Topics MQTT attendus (payload JSON) :
-  neato/robot/odom        -> {"x": float, "y": float, "theta": float, "timestamp": float}
-  neato/robot/ranges      -> {"ranges": [float,...], "angle_min": float, "angle_max": float,
-                               "angle_increment": float, "timestamp": float}
-  neato/robot/cmd_vel     -> {"linear_x": float, "angular_z": float}
+    Offset 0-1   : magic bytes 0x4C 0x44 ("LD")
+    Offset 2     : nombre de blocs de 1080 points dans ce message (normalement 1)
+    Offset 3     : version du format (0x01)
+    Offset 4..   : N x 1080 points x 5 octets, pour chaque point :
+        [0-1] angle   uint16 LE (index 0..1079, résolution 0.33°, PAS des radians)
+        [2-3] distance uint16 LE, en mm (0 = pas de retour valide)
+        [4]   intensité uint8 (0..255)
 
+Voir fang-custom/components/neato_lidar/neato_lidar.h pour la source de vérité
+de ce format (constantes LIDAR_MAGIC_0/1, LIDAR_FORMAT_VERSION, etc.).
+
+--------------------------------------------------------------------------
+Odométrie (dead-reckoning différentiel à partir des encodeurs de roues) :
+--------------------------------------------------------------------------
+Topic MQTT : <mqtt_prefix>/wheels, payload JSON :
+    {"left_mm": float, "right_mm": float, "timestamp": float}
+
+  - left_mm / right_mm : distance CUMULÉE parcourue par chaque roue, en mm
+    (valeur croissante/décroissante monotone, typiquement issue de la
+    commande série Neato "GetMotors" -> champs LeftWheel_PositionInMM /
+    RightWheel_PositionInMM. Ce n'est PAS encore publié par le firmware
+    actuel du repo : il faut ajouter la lecture de GetMotors côté ESPHome
+    et publier ce message MQTT pour que l'odométrie fonctionne.)
+
+Le bridge calcule x/y/theta par intégration différentielle à partir des
+DELTAS de left_mm/right_mm entre deux messages (donc peu importe si les
+compteurs sont remis à zéro de temps en temps, tant qu'il n'y a pas de
+coupure de connexion au mauvais moment).
+
+Topic MQTT alternatif : <mqtt_prefix>/odom, payload JSON (pose déjà calculée) :
+    {"x": float, "y": float, "theta": float, "timestamp": float}
+  -> conservé pour compatibilité / si une autre source calcule déjà la pose.
+
+Topic MQTT : <mqtt_prefix>/cmd_vel, payload JSON :
+    {"linear_x": float, "angular_z": float}
+
+--------------------------------------------------------------------------
 Topics ROS2 publiés :
     /odom           -> nav_msgs/Odometry
     /scan           -> sensor_msgs/LaserScan
     /cmd_vel        -> geometry_msgs/Twist
-  TF: odom -> base_link
+    TF: odom -> base_link
 """
 
 import json
 import math
+import struct
 import time
 import threading
 import rclpy
@@ -49,6 +82,20 @@ except ImportError:
     HAS_WS = False
 
 
+# --- Constantes du protocole binaire LiDAR (doivent matcher neato_lidar.h) ---
+LIDAR_MAGIC_0 = 0x4C
+LIDAR_MAGIC_1 = 0x44
+LIDAR_FORMAT_VERSION = 0x01
+LIDAR_POINTS_PER_SCAN = 1080
+LIDAR_BYTES_PER_POINT = 5  # uint16 angle + uint16 distance + uint8 intensité
+LIDAR_HEADER_SIZE = 4
+LIDAR_BLOCK_SIZE = LIDAR_POINTS_PER_SCAN * LIDAR_BYTES_PER_POINT  # 5400
+LIDAR_POINT_STRUCT = struct.Struct('<HHB')  # angle(u16 LE), distance(u16 LE), intensity(u8)
+
+RANGE_MIN_M = 0.1
+RANGE_MAX_M = 8.0
+
+
 class SlamBridge(Node):
     def __init__(self):
         super().__init__('slam_bridge')
@@ -57,7 +104,14 @@ class SlamBridge(Node):
         self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.126').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
+        self.lidar_mqtt_topic = self.declare_parameter('lidar_mqtt_topic', 'neato/scan').value
         self.ws_port = int(self.declare_parameter('ws_port', 2003).value)
+
+        # Empattement (distance entre les deux roues motrices), en mètres.
+        # Valeur par défaut approximative pour un Neato D-series (~0.248 m,
+        # cf. drivers Neato ROS1 open-source) : À VÉRIFIER / mesurer sur ton D7,
+        # une erreur ici fausse directement l'estimation de rotation (theta).
+        self.wheel_base_m = float(self.declare_parameter('wheel_base_m', 0.248).value)
 
         # --- Publishers ROS2 ---
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
@@ -65,9 +119,14 @@ class SlamBridge(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
 
-        # --- État ---
+        # --- État odométrie (dead-reckoning) ---
         self._odom_lock = threading.Lock()
-        self._last_odom = None
+        self._odo_x = 0.0
+        self._odo_y = 0.0
+        self._odo_theta = 0.0
+        self._prev_left_mm = None
+        self._prev_right_mm = None
+        self._prev_odom_ts = None
 
         # --- MQTT ---
         self._mqtt_client = None
@@ -75,6 +134,8 @@ class SlamBridge(Node):
         self._mqtt_reconnect_timer = None
         if HAS_MQTT:
             self._init_mqtt()
+        else:
+            self.get_logger().error("paho-mqtt non installé, pas de source MQTT !")
 
         # --- WebSocket (pour les clients qui préfèrent WS) ---
         if HAS_WS:
@@ -82,7 +143,8 @@ class SlamBridge(Node):
 
         self.get_logger().info(
             f"slam_bridge initialisé | MQTT={self.mqtt_broker}:{self.mqtt_port} "
-            f"WS=:{self.ws_port} prefix={self.mqtt_prefix}"
+            f"WS=:{self.ws_port} prefix={self.mqtt_prefix} "
+            f"lidar_topic={self.lidar_mqtt_topic} wheel_base={self.wheel_base_m}m"
         )
 
     # ------------------------------------------------------------------ MQTT
@@ -122,10 +184,17 @@ class SlamBridge(Node):
         if rc == 0:
             self._mqtt_connected = True
             prefix = self.mqtt_prefix
+            # Données "métier" du robot, en JSON
             client.subscribe(f"{prefix}/odom", qos=1)
-            client.subscribe(f"{prefix}/ranges", qos=1)
+            client.subscribe(f"{prefix}/wheels", qos=1)
             client.subscribe(f"{prefix}/cmd_vel", qos=1)
-            self.get_logger().info(f"MQTT subscribed to {prefix}/#")
+            # Flux LiDAR binaire, topic dédié (celui configuré côté ESPHome
+            # dans le composant neato_lidar : mqtt_topic:)
+            client.subscribe(self.lidar_mqtt_topic, qos=0)
+            self.get_logger().info(
+                f"MQTT subscribed to {prefix}/{{odom,wheels,cmd_vel}} "
+                f"and {self.lidar_mqtt_topic}"
+            )
         else:
             self.get_logger().error(f"MQTT connect rc={rc}")
 
@@ -140,16 +209,24 @@ class SlamBridge(Node):
             self._mqtt_reconnect_timer.start()
 
     def _on_mqtt_message(self, client, userdata, msg):
+        topic = msg.topic
+
+        # --- Flux LiDAR : binaire, pas du JSON ---
+        if topic == self.lidar_mqtt_topic:
+            self._handle_lidar_binary(msg.payload)
+            return
+
+        # --- Tout le reste : JSON ---
         try:
             data = json.loads(msg.payload.decode('utf-8'))
         except (json.JSONDecodeError, UnicodeDecodeError):
+            self.get_logger().warn(f"Payload JSON invalide sur {topic}, ignoré")
             return
 
-        topic = msg.topic
-        if topic.endswith('/odom'):
-            self._handle_odom(data)
-        elif topic.endswith('/ranges'):
-            self._handle_ranges(data)
+        if topic.endswith('/wheels'):
+            self._handle_wheels(data)
+        elif topic.endswith('/odom'):
+            self._handle_odom_precomputed(data)
         elif topic.endswith('/cmd_vel'):
             self._handle_cmd_vel(data)
 
@@ -169,15 +246,20 @@ class SlamBridge(Node):
             self.get_logger().info("WS client connecté")
             try:
                 async for raw in websocket:
+                    # Un scan LiDAR envoyé en binaire par WS suit le même
+                    # format que sur MQTT.
+                    if isinstance(raw, (bytes, bytearray)):
+                        self._handle_lidar_binary(bytes(raw))
+                        continue
                     try:
                         data = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
                     msg_type = data.get('type', '')
-                    if msg_type == 'odom':
-                        self._handle_odom(data)
-                    elif msg_type == 'ranges':
-                        self._handle_ranges(data)
+                    if msg_type == 'wheels':
+                        self._handle_wheels(data)
+                    elif msg_type == 'odom':
+                        self._handle_odom_precomputed(data)
                     elif msg_type == 'cmd_vel':
                         self._handle_cmd_vel(data)
             except Exception:
@@ -192,19 +274,158 @@ class SlamBridge(Node):
         except Exception as e:
             self.get_logger().error(f"WS server error: {e}")
 
-    # --------------------------------------------------------- Handlers
-    def _handle_odom(self, data: dict):
-        x = float(data.get('x', 0.0))
-        y = float(data.get('y', 0.0))
-        theta = float(data.get('theta', 0.0))
+    # --------------------------------------------------------- LiDAR (binaire)
+    def _handle_lidar_binary(self, payload: bytes):
+        if len(payload) < LIDAR_HEADER_SIZE:
+            self.get_logger().warn(f"Trame LiDAR trop courte ({len(payload)} octets)")
+            return
+
+        if payload[0] != LIDAR_MAGIC_0 or payload[1] != LIDAR_MAGIC_1:
+            self.get_logger().warn(
+                f"Magic bytes invalides (0x{payload[0]:02X} 0x{payload[1]:02X}), "
+                f"trame ignorée"
+            )
+            return
+
+        block_count = payload[2]
+        version = payload[3]
+        if version != LIDAR_FORMAT_VERSION:
+            self.get_logger().warn(
+                f"Version de format LiDAR inattendue: 0x{version:02X} "
+                f"(attendu 0x{LIDAR_FORMAT_VERSION:02X}), on tente quand même"
+            )
+
+        expected_len = LIDAR_HEADER_SIZE + block_count * LIDAR_BLOCK_SIZE
+        if len(payload) < expected_len:
+            self.get_logger().warn(
+                f"Trame LiDAR tronquée: {len(payload)} octets reçus, "
+                f"{expected_len} attendus pour {block_count} bloc(s)"
+            )
+            return
+
+        now = self.get_clock().now().to_msg()
+        offset = LIDAR_HEADER_SIZE
+        for _ in range(max(block_count, 1)):
+            ranges, intensities = self._parse_scan_block(payload, offset)
+            offset += LIDAR_BLOCK_SIZE
+            self._publish_scan(ranges, intensities, now)
+
+    @staticmethod
+    def _parse_scan_block(payload: bytes, block_offset: int):
+        """Parse un bloc de 1080 points et renvoie (ranges, intensities)
+        indexés par angle (donc robustes à un décalage de phase du scan)."""
+        ranges = [math.inf] * LIDAR_POINTS_PER_SCAN
+        intensities = [0.0] * LIDAR_POINTS_PER_SCAN
+
+        for i in range(LIDAR_POINTS_PER_SCAN):
+            point_offset = block_offset + i * LIDAR_BYTES_PER_POINT
+            angle_idx, dist_mm, intensity = LIDAR_POINT_STRUCT.unpack_from(
+                payload, point_offset
+            )
+
+            if angle_idx >= LIDAR_POINTS_PER_SCAN:
+                # Point corrompu / hors plage, on l'ignore
+                continue
+
+            if dist_mm == 0:
+                # 0 = pas de retour valide (convention Neato)
+                continue
+
+            dist_m = dist_mm / 1000.0
+            if dist_m < RANGE_MIN_M or dist_m > RANGE_MAX_M:
+                continue
+
+            ranges[angle_idx] = dist_m
+            intensities[angle_idx] = float(intensity)
+
+        return ranges, intensities
+
+    def _publish_scan(self, ranges, intensities, stamp):
+        scan = LaserScan()
+        scan.header.stamp = stamp
+        scan.header.frame_id = 'laser_link'
+        scan.angle_min = 0.0
+        scan.angle_max = 2.0 * math.pi * (LIDAR_POINTS_PER_SCAN - 1) / LIDAR_POINTS_PER_SCAN
+        scan.angle_increment = 2.0 * math.pi / LIDAR_POINTS_PER_SCAN
+        scan.time_increment = 0.0
+        scan.scan_time = 0.0
+        scan.range_min = RANGE_MIN_M
+        scan.range_max = RANGE_MAX_M
+        scan.ranges = ranges
+        scan.intensities = intensities
+        self.scan_pub.publish(scan)
+
+    # --------------------------------------------------------- Odométrie
+    def _handle_wheels(self, data: dict):
+        """Dead-reckoning différentiel à partir des positions cumulées
+        (en mm) des deux roues motrices."""
+        try:
+            left_mm = float(data['left_mm'])
+            right_mm = float(data['right_mm'])
+        except (KeyError, TypeError, ValueError):
+            self.get_logger().warn(f"Message /wheels invalide: {data}")
+            return
         ts = float(data.get('timestamp', time.time()))
 
         with self._odom_lock:
-            self._last_odom = (x, y, theta, ts)
+            if self._prev_left_mm is None:
+                # Premier message : on initialise juste la référence,
+                # pas de delta calculable encore.
+                self._prev_left_mm = left_mm
+                self._prev_right_mm = right_mm
+                self._prev_odom_ts = ts
+                return
 
-        # Publier /odom
+            delta_left_m = (left_mm - self._prev_left_mm) / 1000.0
+            delta_right_m = (right_mm - self._prev_right_mm) / 1000.0
+            dt = max(ts - self._prev_odom_ts, 1e-3)
+
+            self._prev_left_mm = left_mm
+            self._prev_right_mm = right_mm
+            self._prev_odom_ts = ts
+
+            # Filet de sécurité : un saut énorme (reset compteur ESP,
+            # overflow, glitch) ne doit pas téléporter la pose.
+            if abs(delta_left_m) > 1.0 or abs(delta_right_m) > 1.0:
+                self.get_logger().warn(
+                    "Delta roue aberrant (>1m entre deux messages), "
+                    "ignoré (reset de compteur côté robot ?)"
+                )
+                return
+
+            d_center = (delta_left_m + delta_right_m) / 2.0
+            d_theta = (delta_right_m - delta_left_m) / self.wheel_base_m
+
+            # Intégration au point milieu (plus précis qu'un simple Euler)
+            mid_theta = self._odo_theta + d_theta / 2.0
+            self._odo_x += d_center * math.cos(mid_theta)
+            self._odo_y += d_center * math.sin(mid_theta)
+            self._odo_theta = self._normalize_angle(self._odo_theta + d_theta)
+
+            lin_vel = d_center / dt
+            ang_vel = d_theta / dt
+
+            x, y, theta = self._odo_x, self._odo_y, self._odo_theta
+
+        self._publish_odom(x, y, theta, lin_vel, ang_vel)
+
+    def _handle_odom_precomputed(self, data: dict):
+        """Chemin alternatif : une source externe envoie déjà x/y/theta
+        calculés (conservé pour compatibilité)."""
+        x = float(data.get('x', 0.0))
+        y = float(data.get('y', 0.0))
+        theta = float(data.get('theta', 0.0))
+
+        with self._odom_lock:
+            self._odo_x, self._odo_y, self._odo_theta = x, y, theta
+
+        self._publish_odom(x, y, theta, 0.0, 0.0)
+
+    def _publish_odom(self, x, y, theta, lin_vel, ang_vel):
+        stamp = self.get_clock().now().to_msg()
+
         odom = Odometry()
-        odom.header.stamp = self.get_clock().now().to_msg()
+        odom.header.stamp = stamp
         odom.header.frame_id = 'odom'
         odom.child_frame_id = 'base_link'
 
@@ -212,8 +433,6 @@ class SlamBridge(Node):
         odom.pose.pose.position.y = y
         odom.pose.pose.position.z = 0.0
         odom.pose.pose.orientation = self._euler_to_quat(theta)
-
-        # Covariance (valeur par défaut, à affiner selon le capteur)
         odom.pose.covariance = [
             0.001, 0, 0, 0, 0, 0,
             0, 0.001, 0, 0, 0, 0,
@@ -222,11 +441,14 @@ class SlamBridge(Node):
             0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0,
         ]
+
+        odom.twist.twist.linear.x = lin_vel
+        odom.twist.twist.angular.z = ang_vel
+
         self.odom_pub.publish(odom)
 
-        # Publier TF odom -> base_link
         t = TransformStamped()
-        t.header.stamp = odom.header.stamp
+        t.header.stamp = stamp
         t.header.frame_id = 'odom'
         t.child_frame_id = 'base_link'
         t.transform.translation.x = x
@@ -235,48 +457,19 @@ class SlamBridge(Node):
         t.transform.rotation = odom.pose.pose.orientation
         self.tf_broadcaster.sendTransform(t)
 
-    def _handle_ranges(self, data: dict):
-        ranges = [float(r) for r in data.get('ranges', [])]
-        angle_min = float(data.get('angle_min', 0.0))
-        angle_max = float(data.get('angle_max', 2 * math.pi))
-        angle_inc = float(data.get('angle_increment', 0.0))
-
-        # Pour le D7 gen3 avec LiDAR 360° :
-        # Si angle_increment n'est pas fourni ou est 0, on le calcule
-        # à partir du nombre de points
-        if angle_inc <= 0.0 and len(ranges) > 1:
-            angle_inc = (angle_max - angle_min) / len(ranges)
-
-        # Si on a exactement 720 points (résolution 0.5°), on force
-        if len(ranges) == 720 and abs(angle_inc - 0.0) < 0.001:
-            angle_inc = (2 * math.pi) / 720.0
-
-        # Si on a 360 points (résolution 1°), on force
-        if len(ranges) == 360 and abs(angle_inc - 0.0) < 0.001:
-            angle_inc = (2 * math.pi) / 360.0
-
-        # Sécurité : si on n'a toujours pas d'angle_inc valide, on utilise 0.5°
-        if angle_inc <= 0.0:
-            angle_inc = (2 * math.pi) / 720.0
-
-        scan = LaserScan()
-        scan.header.stamp = self.get_clock().now().to_msg()
-        scan.header.frame_id = 'laser_link'
-        scan.angle_min = angle_min
-        scan.angle_max = angle_max
-        scan.angle_increment = angle_inc
-        scan.time_increment = 0.0
-        scan.scan_time = 0.0
-        scan.range_min = 0.1
-        scan.range_max = 8.0
-        scan.ranges = ranges
-        self.scan_pub.publish(scan)
-
     def _handle_cmd_vel(self, data: dict):
         twist = Twist()
         twist.linear.x = float(data.get('linear_x', 0.0))
         twist.angular.z = float(data.get('angular_z', 0.0))
         self.cmd_vel_pub.publish(twist)
+
+    @staticmethod
+    def _normalize_angle(angle: float) -> float:
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
 
     @staticmethod
     def _euler_to_quat(theta: float) -> Quaternion:
