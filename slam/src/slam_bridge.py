@@ -5,21 +5,36 @@ Reçoit les données du robot Neato D7 gen3 (via MQTT ou WebSocket) et les publi
 en topics ROS2 pour slam_toolbox.
 
 --------------------------------------------------------------------------
-LiDAR (format BINAIRE réel publié par le composant ESPHome neato_lidar) :
+LiDAR (JSON, produit par le parsing de "GetLDSScan" sur le port debug) :
 --------------------------------------------------------------------------
-Topic MQTT (mqtt_topic du composant neato_lidar, ex: "neato/scan" ou
-"neato/<device_id>/scan") -> payload binaire :
+IMPORTANT : le hardware de ce projet n'a QU'UN SEUL fil vers l'ESP32 (le
+port debug principal, cf install-esp-device-gen3.md) - pas de second fil
+direct sur le module LDS. Le flux binaire brut du capteur (protocole
+XV-11 : paquets 22 octets, sync 0xFA, checksum, cf recherche publique)
+n'est donc PAS accessible ici. Les scans passent par la commande texte
+"GetLDSScan" du port debug, comme GetCharger/GetMotor/etc. L'ancien
+composant fang-custom/components/neato_lidar/ (qui supposait un second
+uart dédié) NE S'APPLIQUE PAS à ce hardware et ne doit pas être inclus.
 
-    Offset 0-1   : magic bytes 0x4C 0x44 ("LD")
-    Offset 2     : nombre de blocs de 1080 points dans ce message (normalement 1)
-    Offset 3     : version du format (0x01)
-    Offset 4..   : N x 1080 points x 5 octets, pour chaque point :
-        [0-1] angle   uint16 LE (index 0..1079, résolution 0.33°, PAS des radians)
-        [2-3] distance uint16 LE, en mm (0 = pas de retour valide)
-        [4]   intensité uint8 (0..255)
+Topic MQTT : <mqtt_prefix>/scan, payload JSON (publié par le parsing de
+GetLDSScan dans config/comp/gen3.yaml) :
+    {
+      "ranges": [float|null, ...],   # 360 valeurs, une par degré, mètres
+                                       # (null = pas de retour valide)
+      "angle_min": 0.0,
+      "angle_max": 6.2657,            # ~359° en radians
+      "angle_increment": 0.017453,    # 1° en radians
+      "timestamp": float
+    }
 
-Voir fang-custom/components/neato_lidar/neato_lidar.h pour la source de vérité
-de ce format (constantes LIDAR_MAGIC_0/1, LIDAR_FORMAT_VERSION, etc.).
+ATTENTION - débit limité : GetMotor et GetLDSScan partagent le même bus
+UART (un seul fil) et sont envoyés en alternance stricte côté ESPHome
+(cf config/comp/slam-odom.yaml). Sur ce hardware, attends-toi à un scan
+et une mise à jour d'odométrie environ toutes les 1-2 secondes, pas du
+10Hz. C'est une limite physique du montage à un seul fil, pas un bug du
+bridge : slam_toolbox fonctionnera, mais avec une carte qui se construit
+plus lentement et une intégration d'odométrie plus sensible aux dérives
+entre deux échantillons (le robot doit rester lent pendant le mapping).
 
 --------------------------------------------------------------------------
 Odométrie (dead-reckoning différentiel à partir des encodeurs de roues) :
@@ -56,7 +71,6 @@ Topics ROS2 publiés :
 
 import json
 import math
-import struct
 import time
 import threading
 import rclpy
@@ -82,16 +96,9 @@ except ImportError:
     HAS_WS = False
 
 
-# --- Constantes du protocole binaire LiDAR (doivent matcher neato_lidar.h) ---
-LIDAR_MAGIC_0 = 0x4C
-LIDAR_MAGIC_1 = 0x44
-LIDAR_FORMAT_VERSION = 0x01
-LIDAR_POINTS_PER_SCAN = 1080
-LIDAR_BYTES_PER_POINT = 5  # uint16 angle + uint16 distance + uint8 intensité
-LIDAR_HEADER_SIZE = 4
-LIDAR_BLOCK_SIZE = LIDAR_POINTS_PER_SCAN * LIDAR_BYTES_PER_POINT  # 5400
-LIDAR_POINT_STRUCT = struct.Struct('<HHB')  # angle(u16 LE), distance(u16 LE), intensity(u8)
-
+# --- Constantes du scan LiDAR (doivent matcher le JSON publié par
+#     config/comp/gen3.yaml, branche "GetLDSScan") ---
+LIDAR_POINTS_PER_SCAN = 360  # une mesure par degré (résolution du GetLDSScan texte)
 RANGE_MIN_M = 0.1
 RANGE_MAX_M = 8.0
 
@@ -104,7 +111,6 @@ class SlamBridge(Node):
         self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.126').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
-        self.lidar_mqtt_topic = self.declare_parameter('lidar_mqtt_topic', 'neato/scan').value
         self.ws_port = int(self.declare_parameter('ws_port', 2003).value)
 
         # Empattement (distance entre les deux roues motrices), en mètres.
@@ -144,7 +150,7 @@ class SlamBridge(Node):
         self.get_logger().info(
             f"slam_bridge initialisé | MQTT={self.mqtt_broker}:{self.mqtt_port} "
             f"WS=:{self.ws_port} prefix={self.mqtt_prefix} "
-            f"lidar_topic={self.lidar_mqtt_topic} wheel_base={self.wheel_base_m}m"
+            f"wheel_base={self.wheel_base_m}m"
         )
 
     # ------------------------------------------------------------------ MQTT
@@ -184,16 +190,14 @@ class SlamBridge(Node):
         if rc == 0:
             self._mqtt_connected = True
             prefix = self.mqtt_prefix
-            # Données "métier" du robot, en JSON
+            # Tout est en JSON, y compris le scan (voir config/comp/gen3.yaml,
+            # branche GetLDSScan, et config/comp/slam-odom.yaml pour le topic).
             client.subscribe(f"{prefix}/odom", qos=1)
             client.subscribe(f"{prefix}/wheels", qos=1)
             client.subscribe(f"{prefix}/cmd_vel", qos=1)
-            # Flux LiDAR binaire, topic dédié (celui configuré côté ESPHome
-            # dans le composant neato_lidar : mqtt_topic:)
-            client.subscribe(self.lidar_mqtt_topic, qos=0)
+            client.subscribe(f"{prefix}/scan", qos=0)
             self.get_logger().info(
-                f"MQTT subscribed to {prefix}/{{odom,wheels,cmd_vel}} "
-                f"and {self.lidar_mqtt_topic}"
+                f"MQTT subscribed to {prefix}/{{odom,wheels,cmd_vel,scan}}"
             )
         else:
             self.get_logger().error(f"MQTT connect rc={rc}")
@@ -211,19 +215,17 @@ class SlamBridge(Node):
     def _on_mqtt_message(self, client, userdata, msg):
         topic = msg.topic
 
-        # --- Flux LiDAR : binaire, pas du JSON ---
-        if topic == self.lidar_mqtt_topic:
-            self._handle_lidar_binary(msg.payload)
-            return
-
-        # --- Tout le reste : JSON ---
+        # --- Tout est en JSON (scan inclus, depuis la découverte que le
+        #     hardware n'a qu'un seul fil vers le port debug) ---
         try:
             data = json.loads(msg.payload.decode('utf-8'))
         except (json.JSONDecodeError, UnicodeDecodeError):
             self.get_logger().warn(f"Payload JSON invalide sur {topic}, ignoré")
             return
 
-        if topic.endswith('/wheels'):
+        if topic.endswith('/scan'):
+            self._handle_scan_json(data)
+        elif topic.endswith('/wheels'):
             self._handle_wheels(data)
         elif topic.endswith('/odom'):
             self._handle_odom_precomputed(data)
@@ -246,17 +248,18 @@ class SlamBridge(Node):
             self.get_logger().info("WS client connecté")
             try:
                 async for raw in websocket:
-                    # Un scan LiDAR envoyé en binaire par WS suit le même
-                    # format que sur MQTT.
                     if isinstance(raw, (bytes, bytearray)):
-                        self._handle_lidar_binary(bytes(raw))
+                        # Plus de flux binaire sur ce hardware (un seul fil,
+                        # cf en-tête du fichier) : on ignore silencieusement.
                         continue
                     try:
                         data = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
                     msg_type = data.get('type', '')
-                    if msg_type == 'wheels':
+                    if msg_type == 'scan':
+                        self._handle_scan_json(data)
+                    elif msg_type == 'wheels':
                         self._handle_wheels(data)
                     elif msg_type == 'odom':
                         self._handle_odom_precomputed(data)
@@ -274,85 +277,54 @@ class SlamBridge(Node):
         except Exception as e:
             self.get_logger().error(f"WS server error: {e}")
 
-    # --------------------------------------------------------- LiDAR (binaire)
-    def _handle_lidar_binary(self, payload: bytes):
-        if len(payload) < LIDAR_HEADER_SIZE:
-            self.get_logger().warn(f"Trame LiDAR trop courte ({len(payload)} octets)")
+    # --------------------------------------------------------- LiDAR (JSON)
+    def _handle_scan_json(self, data: dict):
+        """Parse le JSON publié par la branche GetLDSScan de gen3.yaml :
+        {"ranges": [float|null, ...] (360), "angle_min":.., "angle_max":..,
+         "angle_increment":.., "timestamp":..}"""
+        raw_ranges = data.get('ranges')
+        if not isinstance(raw_ranges, list):
+            self.get_logger().warn("Message /scan sans champ 'ranges' valide, ignoré")
             return
 
-        if payload[0] != LIDAR_MAGIC_0 or payload[1] != LIDAR_MAGIC_1:
-            self.get_logger().warn(
-                f"Magic bytes invalides (0x{payload[0]:02X} 0x{payload[1]:02X}), "
-                f"trame ignorée"
-            )
+        ranges = []
+        for r in raw_ranges:
+            if r is None:
+                ranges.append(math.inf)
+                continue
+            try:
+                v = float(r)
+            except (TypeError, ValueError):
+                ranges.append(math.inf)
+                continue
+            if v < RANGE_MIN_M or v > RANGE_MAX_M:
+                ranges.append(math.inf)
+            else:
+                ranges.append(v)
+
+        n = len(ranges)
+        if n == 0:
             return
 
-        block_count = payload[2]
-        version = payload[3]
-        if version != LIDAR_FORMAT_VERSION:
-            self.get_logger().warn(
-                f"Version de format LiDAR inattendue: 0x{version:02X} "
-                f"(attendu 0x{LIDAR_FORMAT_VERSION:02X}), on tente quand même"
-            )
+        angle_min = float(data.get('angle_min', 0.0))
+        angle_max = float(data.get('angle_max', 2.0 * math.pi * (n - 1) / n))
+        angle_increment = float(data.get('angle_increment', 2.0 * math.pi / n))
 
-        expected_len = LIDAR_HEADER_SIZE + block_count * LIDAR_BLOCK_SIZE
-        if len(payload) < expected_len:
-            self.get_logger().warn(
-                f"Trame LiDAR tronquée: {len(payload)} octets reçus, "
-                f"{expected_len} attendus pour {block_count} bloc(s)"
-            )
-            return
-
-        now = self.get_clock().now().to_msg()
-        offset = LIDAR_HEADER_SIZE
-        for _ in range(max(block_count, 1)):
-            ranges, intensities = self._parse_scan_block(payload, offset)
-            offset += LIDAR_BLOCK_SIZE
-            self._publish_scan(ranges, intensities, now)
-
-    @staticmethod
-    def _parse_scan_block(payload: bytes, block_offset: int):
-        """Parse un bloc de 1080 points et renvoie (ranges, intensities)
-        indexés par angle (donc robustes à un décalage de phase du scan)."""
-        ranges = [math.inf] * LIDAR_POINTS_PER_SCAN
-        intensities = [0.0] * LIDAR_POINTS_PER_SCAN
-
-        for i in range(LIDAR_POINTS_PER_SCAN):
-            point_offset = block_offset + i * LIDAR_BYTES_PER_POINT
-            angle_idx, dist_mm, intensity = LIDAR_POINT_STRUCT.unpack_from(
-                payload, point_offset
-            )
-
-            if angle_idx >= LIDAR_POINTS_PER_SCAN:
-                # Point corrompu / hors plage, on l'ignore
-                continue
-
-            if dist_mm == 0:
-                # 0 = pas de retour valide (convention Neato)
-                continue
-
-            dist_m = dist_mm / 1000.0
-            if dist_m < RANGE_MIN_M or dist_m > RANGE_MAX_M:
-                continue
-
-            ranges[angle_idx] = dist_m
-            intensities[angle_idx] = float(intensity)
-
-        return ranges, intensities
-
-    def _publish_scan(self, ranges, intensities, stamp):
         scan = LaserScan()
-        scan.header.stamp = stamp
+        scan.header.stamp = self.get_clock().now().to_msg()
         scan.header.frame_id = 'laser_link'
-        scan.angle_min = 0.0
-        scan.angle_max = 2.0 * math.pi * (LIDAR_POINTS_PER_SCAN - 1) / LIDAR_POINTS_PER_SCAN
-        scan.angle_increment = 2.0 * math.pi / LIDAR_POINTS_PER_SCAN
+        scan.angle_min = angle_min
+        scan.angle_max = angle_max
+        scan.angle_increment = angle_increment
         scan.time_increment = 0.0
         scan.scan_time = 0.0
         scan.range_min = RANGE_MIN_M
         scan.range_max = RANGE_MAX_M
         scan.ranges = ranges
-        scan.intensities = intensities
+        # GetLDSScan ne fournit pas d'intensité exploitable ici (l'intensité
+        # brute XV-11 n'est de toute façon pas accessible sur ce hardware,
+        # cf en-tête du fichier) : on laisse intensities vide, slam_toolbox
+        # ne s'en sert pas pour le scan matching.
         self.scan_pub.publish(scan)
 
     # --------------------------------------------------------- Odométrie
