@@ -22,6 +22,18 @@
 //
 // Ce fichier ne dépend d'aucune bibliothèque externe, juste un <canvas>.
 
+// Doit rester aligné avec ZONE_COLORS / ZONE_ICONS dans slam_server.py -
+// si tu ajoutes une couleur/icône ici, ajoute-la aussi côté backend,
+// sinon le POST /api/zones sera rejeté avec une erreur 400.
+const ZONE_COLORS = {
+  red: '#e53935', blue: '#1e88e5', green: '#43a047', amber: '#ffb300',
+  purple: '#8e24aa', teal: '#00897b', pink: '#d81b60', gray: '#757575',
+};
+const ZONE_ICONS = {
+  sofa: '🛋️', cooking: '🍳', bed: '🛏️', bath: '🛁', door: '🚪',
+  box: '📦', plant: '🪴', tv: '📺', stairs: '🪜', 'washing-machine': '🧺',
+};
+
 class NeatoZoneMapCard extends HTMLElement {
   setConfig(config) {
     if (!config.api_base_url) {
@@ -31,6 +43,7 @@ class NeatoZoneMapCard extends HTMLElement {
     this._apiBase = config.api_base_url.replace(/\/$/, '');
     this._refreshMs = config.refresh_ms || 4000;
     this._polygon = []; // points en coordonnées MONDE (mètres), pas pixels
+    this._zones = []; // zones nommées enregistrées, récupérées de /api/zones
     this._mapInfo = null;
     this._rendered = false;
     this._safetyStop = false;
@@ -73,6 +86,25 @@ class NeatoZoneMapCard extends HTMLElement {
           background: #c62828; color: white; padding: 6px 10px; border-radius: 6px;
           margin-bottom: 8px; font-weight: bold; display: none;
         }
+        .save-form {
+          display: none; gap: 8px; align-items: center; flex-wrap: wrap;
+          margin: 8px 0; padding: 8px; border-radius: 6px;
+          background: var(--secondary-background-color, #f0f0f0);
+        }
+        .save-form.visible { display: flex; }
+        .save-form input[type="text"] {
+          padding: 5px 8px; border-radius: 4px; border: 1px solid #ccc; font-size: 0.9em; flex: 1; min-width: 100px;
+        }
+        .save-form select { padding: 5px; border-radius: 4px; border: 1px solid #ccc; font-size: 0.9em; }
+        .zones-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+        .zone-chip {
+          display: flex; align-items: center; gap: 6px; padding: 4px 8px 4px 6px;
+          border-radius: 16px; font-size: 0.85em; color: white; cursor: pointer; border: none;
+        }
+        .zone-chip .del {
+          background: rgba(255,255,255,0.3); border-radius: 50%; width: 16px; height: 16px;
+          display: flex; align-items: center; justify-content: center; font-size: 0.8em; cursor: pointer;
+        }
       </style>
       <ha-card header="Carte Neato - sélection de zone">
         <div class="safety-banner" id="safetyBanner">
@@ -86,6 +118,20 @@ class NeatoZoneMapCard extends HTMLElement {
           <button id="btnDiagnose" class="secondary">Lancer le diagnostic</button>
         </div>
         <canvas id="mapCanvas" width="600" height="600"></canvas>
+
+        <div class="save-form" id="saveForm">
+          <input type="text" id="zoneName" placeholder="Nom de la zone (ex: Salon)" maxlength="30" />
+          <select id="zoneColor">
+            ${Object.keys(ZONE_COLORS).map(c => `<option value="${c}">${c}</option>`).join('')}
+          </select>
+          <select id="zoneIcon">
+            ${Object.entries(ZONE_ICONS).map(([k, v]) => `<option value="${k}">${v} ${k}</option>`).join('')}
+          </select>
+          <button id="btnSaveZone">Enregistrer la zone</button>
+        </div>
+
+        <div class="zones-list" id="zonesList"></div>
+
         <div class="status" id="statusText">Chargement de la carte...</div>
       </ha-card>
     `;
@@ -103,15 +149,18 @@ class NeatoZoneMapCard extends HTMLElement {
     this.shadowRoot.getElementById('btnCleanAll').addEventListener('click', () => this._cleanAll());
     this.shadowRoot.getElementById('btnStop').addEventListener('click', () => this._stopCleaning());
     this.shadowRoot.getElementById('btnDiagnose').addEventListener('click', () => this._runDiagnose());
+    this.shadowRoot.getElementById('btnSaveZone').addEventListener('click', () => this._saveZone());
 
     this._fetchMap();
     this._fetchSafety();
+    this._fetchZones();
   }
 
   _startPolling() {
     this._pollTimer = setInterval(() => {
       this._fetchMap();
       this._fetchSafety();
+      this._fetchZones();
     }, this._refreshMs);
   }
 
@@ -165,6 +214,102 @@ class NeatoZoneMapCard extends HTMLElement {
     } catch (e) {
       this._setStatus(`Erreur d'envoi: ${e.message}`);
     }
+  }
+
+  async _fetchZones() {
+    try {
+      const res = await fetch(`${this._apiBase}/api/zones`);
+      if (!res.ok) return;
+      this._zones = await res.json();
+      this._renderZonesList();
+      this._draw();
+    } catch (e) {
+      // Silencieux : pas critique si un seul poll échoue.
+    }
+  }
+
+  async _saveZone() {
+    if (this._polygon.length < 3) return;
+    const name = this.shadowRoot.getElementById('zoneName').value.trim();
+    const color = this.shadowRoot.getElementById('zoneColor').value;
+    const icon = this.shadowRoot.getElementById('zoneIcon').value;
+    if (!name) {
+      this._setStatus('Donne un nom à la zone avant de l\'enregistrer.');
+      return;
+    }
+    try {
+      const res = await fetch(`${this._apiBase}/api/zones`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, color, icon, polygon: this._polygon }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        this._setStatus(`Erreur: ${data.error || res.status}`);
+        return;
+      }
+      this._setStatus(`Zone "${name}" enregistrée`);
+      this._polygon = [];
+      this.shadowRoot.getElementById('zoneName').value = '';
+      this._updateButtons();
+      await this._fetchZones();
+    } catch (e) {
+      this._setStatus(`Erreur d'enregistrement: ${e.message}`);
+    }
+  }
+
+  async _deleteZone(id, name) {
+    try {
+      const res = await fetch(`${this._apiBase}/api/zones/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        this._setStatus(`Erreur suppression: HTTP ${res.status}`);
+        return;
+      }
+      this._setStatus(`Zone "${name}" supprimée`);
+      await this._fetchZones();
+    } catch (e) {
+      this._setStatus(`Erreur suppression: ${e.message}`);
+    }
+  }
+
+  async _cleanNamedZone(id, name) {
+    this._setStatus(`Nettoyage de "${name}" demandé...`);
+    try {
+      const res = await fetch(`${this._apiBase}/api/clean/zone/${id}`, { method: 'POST' });
+      const data = await res.json();
+      this._setStatus(res.ok ? `Nettoyage de "${name}" lancé` : `Erreur: ${data.error || res.status}`);
+    } catch (e) {
+      this._setStatus(`Erreur d'envoi: ${e.message}`);
+    }
+  }
+
+  _renderZonesList() {
+    const container = this.shadowRoot.getElementById('zonesList');
+    if (!container) return;
+    container.innerHTML = '';
+    this._zones.forEach((zone) => {
+      const chip = document.createElement('div');
+      chip.className = 'zone-chip';
+      chip.style.background = ZONE_COLORS[zone.color] || ZONE_COLORS.gray;
+      chip.title = `Nettoyer "${zone.name}"`;
+
+      const label = document.createElement('span');
+      label.textContent = `${ZONE_ICONS[zone.icon] || '📦'} ${zone.name}`;
+      chip.appendChild(label);
+
+      const del = document.createElement('span');
+      del.className = 'del';
+      del.textContent = '×';
+      del.title = 'Supprimer cette zone';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._deleteZone(zone.id, zone.name);
+      });
+      chip.appendChild(del);
+
+      chip.addEventListener('click', () => this._cleanNamedZone(zone.id, zone.name));
+      container.appendChild(chip);
+    });
   }
 
   async _cleanAll() {
@@ -240,6 +385,9 @@ class NeatoZoneMapCard extends HTMLElement {
     const btnZone = this.shadowRoot.getElementById('btnCleanZone');
     btnZone.disabled = this._polygon.length < 3 || this._safetyStop;
     this.shadowRoot.getElementById('btnCleanAll').disabled = this._safetyStop;
+
+    const form = this.shadowRoot.getElementById('saveForm');
+    form.classList.toggle('visible', this._polygon.length >= 3);
   }
 
   _setStatus(text) {
@@ -283,7 +431,38 @@ class NeatoZoneMapCard extends HTMLElement {
     if (this._mapInfo) {
       this._drawGrid();
     }
+    this._drawSavedZones();
     this._drawPolygon();
+  }
+
+  _drawSavedZones() {
+    if (!this._mapInfo) return;
+    const ctx = this._ctx;
+    this._zones.forEach((zone) => {
+      const color = ZONE_COLORS[zone.color] || ZONE_COLORS.gray;
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color + '40'; // ~25% opacité
+      ctx.lineWidth = 2;
+
+      ctx.beginPath();
+      zone.polygon.forEach(([x, y], i) => {
+        const p = this._worldToCanvas(x, y);
+        if (i === 0) ctx.moveTo(p.x, p.y);
+        else ctx.lineTo(p.x, p.y);
+      });
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+
+      // Étiquette (icône + nom) au centroïde approximatif de la zone
+      const cx = zone.polygon.reduce((s, p) => s + p[0], 0) / zone.polygon.length;
+      const cy = zone.polygon.reduce((s, p) => s + p[1], 0) / zone.polygon.length;
+      const center = this._worldToCanvas(cx, cy);
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(`${ZONE_ICONS[zone.icon] || ''} ${zone.name}`, center.x, center.y);
+    });
   }
 
   _drawGrid() {
