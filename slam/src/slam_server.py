@@ -33,12 +33,12 @@ from rclpy.time import Time
 from rclpy.duration import Duration
 
 from nav_msgs.msg import OccupancyGrid
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 try:
-    from flask import Flask, jsonify
+    from flask import Flask, jsonify, request
     from flask_cors import CORS
     HAS_FLASK = True
 except ImportError:
@@ -82,6 +82,7 @@ class SlamServer(Node):
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
         self.create_subscription(Bool, '/safety_stop', self._on_safety_stop, 10)
         self.start_cleaning_pub = self.create_publisher(Bool, '/start_cleaning', 10)
+        self.zone_pub = self.create_publisher(String, '/clean_zone_request', 10)
         self._safety_stop = False
 
         # --- Démarrer les serveurs ---
@@ -223,6 +224,32 @@ class SlamServer(Node):
             msg.data = False
             self.start_cleaning_pub.publish(msg)
             return jsonify({"status": "cleaning_stop_requested"})
+
+        @app.route('/api/clean/zone', methods=['POST'])
+        def clean_zone():
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de démarrer"
+                    }), 409
+
+            body = request.get_json(silent=True)
+            if not body or "polygon" not in body:
+                return jsonify({"error": "corps attendu: {\"polygon\": [[x,y],...]}"}), 400
+
+            polygon = body["polygon"]
+            if not isinstance(polygon, list) or len(polygon) < 3:
+                return jsonify({"error": "polygon doit contenir au moins 3 points [x,y]"}), 400
+            try:
+                # Validation : chaque point doit être une paire de nombres.
+                [(float(p[0]), float(p[1])) for p in polygon]
+            except (TypeError, ValueError, IndexError):
+                return jsonify({"error": "points de polygon invalides, attendu [x,y] numériques"}), 400
+
+            msg = String()
+            msg.data = json.dumps({"polygon": polygon})
+            self.zone_pub.publish(msg)
+            return jsonify({"status": "zone_cleaning_requested", "points": len(polygon)})
 
         t = threading.Thread(
             target=lambda: app.run(host='0.0.0.0', port=self.rest_port, debug=False),
