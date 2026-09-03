@@ -107,8 +107,8 @@ if [ "${NAV2_ENABLED:-false}" = "true" ]; then
             -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
             -p mqtt_port:="${MQTT_PORT:-1883}" \
             -p mqtt_clean_cmd_topic:="${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}" \
-            -p robot_radius_m:="${ROBOT_RADIUS_M:-0.20}" \
-            -p row_spacing_m:="${ROW_SPACING_M:-0.32}" \
+            -p robot_radius_m:="${ROBOT_RADIUS_M:-0.168}" \
+            -p row_spacing_m:="${ROW_SPACING_M:-0.234}" \
             > /app/logs/coverage_planner.log 2>&1 &
     COVERAGE_PID=$!
     echo "[OK] coverage_planner (PID=$COVERAGE_PID)"
@@ -292,8 +292,8 @@ while true; do
                     -p mqtt_broker:="${MQTT_BROKER:-192.168.10.126}" \
                     -p mqtt_port:="${MQTT_PORT:-1883}" \
                     -p mqtt_clean_cmd_topic:="${MQTT_CLEAN_CMD_TOPIC:-neato/robot/clean_cmd}" \
-                    -p robot_radius_m:="${ROBOT_RADIUS_M:-0.20}" \
-                    -p row_spacing_m:="${ROW_SPACING_M:-0.32}" \
+                    -p robot_radius_m:="${ROBOT_RADIUS_M:-0.168}" \
+                    -p row_spacing_m:="${ROW_SPACING_M:-0.234}" \
                     > /app/logs/coverage_planner.log 2>&1 &
             COVERAGE_PID=$!
         fi
