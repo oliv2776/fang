@@ -283,6 +283,15 @@ uart:
           std::vector<std::string> lines = line_buf;
           line_buf.clear();
 
+          // Débloque le round-robin (slam-odom.yaml) : la réponse
+          // précédente est bien terminée, il peut envoyer la commande
+          // suivante en toute sécurité. Sans ça, GetLDSScan (~1.5s de
+          // réponse) se faisait interrompre par la commande suivante
+          // envoyée 500ms plus tard par le timer, corrompant les deux
+          // flux (confirmé sur robot réel : fragments "T_WHEEL_EXTENDED,0"
+          // et "Sensor,mm,255," juste après un GetLDSScan).
+          id(g_awaiting_response) = false;
+
           // S'il restait du texte apres le \x1A (deja le debut de la
           // prochaine reponse), on ne le perd pas : on le remet en attente.
           trim(remainder);
