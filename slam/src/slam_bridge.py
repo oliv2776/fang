@@ -113,6 +113,14 @@ class SlamBridge(Node):
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
         self.ws_port = int(self.declare_parameter('ws_port', 2003).value)
 
+        # Topic MQTT vers lequel republier les commandes de vitesse produites
+        # par Nav2 (ROS2 topic /cmd_vel, standard) à destination de l'ESP32.
+        # Voir config/comp/slam-odom.yaml côté ESPHome pour la traduction en
+        # SetMotor.
+        self.cmd_vel_out_topic = self.declare_parameter(
+            'cmd_vel_out_topic', 'neato/robot/cmd_vel_out'
+        ).value
+
         # Empattement (distance entre les deux roues motrices), en mètres.
         # Valeur par défaut approximative pour un Neato D-series (~0.248 m,
         # cf. drivers Neato ROS1 open-source) : À VÉRIFIER / mesurer sur ton D7,
@@ -122,8 +130,18 @@ class SlamBridge(Node):
         # --- Publishers ROS2 ---
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
         self.scan_pub = self.create_publisher(LaserScan, '/scan', 10)
-        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # /cmd_vel_manual : chemin MQTT->ROS2 existant (télécommande manuelle
+        # via une app, par ex.). Volontairement PAS nommé /cmd_vel : ce nom
+        # est réservé à la sortie de Nav2 (controller_server), voir
+        # _on_nav2_cmd_vel ci-dessous. Publier les deux sur le même topic
+        # ferait interférer manuel et autonome sans arbitrage.
+        self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel_manual', 10)
         self.tf_broadcaster = TransformBroadcaster(self)
+
+        # --- Subscriber ROS2 : /cmd_vel produit par Nav2 -> MQTT vers l'ESP ---
+        self.cmd_vel_sub = self.create_subscription(
+            Twist, '/cmd_vel', self._on_nav2_cmd_vel, 10
+        )
 
         # --- État odométrie (dead-reckoning) ---
         self._odom_lock = threading.Lock()
@@ -150,7 +168,7 @@ class SlamBridge(Node):
         self.get_logger().info(
             f"slam_bridge initialisé | MQTT={self.mqtt_broker}:{self.mqtt_port} "
             f"WS=:{self.ws_port} prefix={self.mqtt_prefix} "
-            f"wheel_base={self.wheel_base_m}m"
+            f"wheel_base={self.wheel_base_m}m cmd_vel_out={self.cmd_vel_out_topic}"
         )
 
     # ------------------------------------------------------------------ MQTT
@@ -434,6 +452,25 @@ class SlamBridge(Node):
         twist.linear.x = float(data.get('linear_x', 0.0))
         twist.angular.z = float(data.get('angular_z', 0.0))
         self.cmd_vel_pub.publish(twist)
+
+    def _on_nav2_cmd_vel(self, msg: Twist):
+        """Reçoit les commandes de vitesse produites par Nav2
+        (controller_server, topic standard /cmd_vel) et les republie en
+        MQTT pour que l'ESP32 les traduise en commandes SetMotor.
+        Voir config/comp/slam-odom.yaml pour la réception côté ESP et la
+        logique de sécurité (arrêt automatique si plus aucun message ne
+        vient d'ici pendant cmd_vel_stale_timeout)."""
+        if self._mqtt_client is None or not self._mqtt_connected:
+            return
+        payload = json.dumps({
+            "linear_x": msg.linear.x,
+            "angular_z": msg.angular.z,
+            "timestamp": time.time(),
+        })
+        try:
+            self._mqtt_client.publish(self.cmd_vel_out_topic, payload, qos=0, retain=False)
+        except Exception as e:
+            self.get_logger().warn(f"Échec publish cmd_vel_out: {e}")
 
     @staticmethod
     def _normalize_angle(angle: float) -> float:
