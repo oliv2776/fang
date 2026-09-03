@@ -433,6 +433,127 @@ uart:
             }
           }
 
+          // ---- SECURITE : GetDigitalSensors -> chocs + roue soulevee ----
+          // Format confirme sur ce robot (research/command-experiments.md) :
+          //   GetDigitalSensors
+          //   Digital Sensor Name, Value
+          //   SNSR_DC_JACK_IS_IN,0
+          //   SNSR_DUSTBIN_IS_IN,1
+          //   SNSR_LEFT_WHEEL_EXTENDED,0   <- roue soulevee = bord/vide en dessous
+          //   SNSR_RIGHT_WHEEL_EXTENDED,0
+          //   LSIDEBIT,0                    <- chocs (pare-chocs) : 1 = touche
+          //   LFRONTBIT,0
+          //   LLDSBIT,0
+          //   RSIDEBIT,0
+          //   RFRONTBIT,0
+          //   RLDSBIT,0
+          else if (command == "GetDigitalSensors") {
+            bool bump = false;
+            bool wheel_extended = false;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              size_t comma = line.find(',');
+              if (comma == std::string::npos) continue;
+
+              std::string key = line.substr(0, comma);
+              std::string value = line.substr(comma + 1);
+              trim(key);
+              trim(value);
+              bool is_set = (value == "1");
+
+              if (key == "SNSR_LEFT_WHEEL_EXTENDED" || key == "SNSR_RIGHT_WHEEL_EXTENDED") {
+                if (is_set) wheel_extended = true;
+              } else if (key == "LSIDEBIT" || key == "LFRONTBIT" ||
+                         key == "RSIDEBIT" || key == "RFRONTBIT") {
+                if (is_set) bump = true;
+              }
+              // LLDSBIT/RLDSBIT : chocs sur le mat LiDAR, pas geres ici pour
+              // l'instant (pas critique pour l'arret d'urgence roues/chute).
+            }
+
+            id(g_safety_bump) = bump;
+            id(g_safety_wheel_extended) = wheel_extended;
+
+            if (bump || wheel_extended) {
+              // ARRET IMMEDIAT, sans attendre le prochain tour du round-robin.
+              id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+              id(g_safety_stop) = true;
+            }
+          }
+
+          // ---- SECURITE : GetAnalogSensors -> detection de vide (chute) ----
+          // Format confirme sur ce robot (research/command-experiments.md) :
+          //   GetAnalogSensors
+          //   SensorName,Unit,Value
+          //   ...
+          //   DropSensorLeft,mm,19,
+          //   DropSensorRight,mm,19,
+          //
+          // SEUIL NON CALIBRE : la valeur "19" ci-dessus vient d'un robot
+          // pose sur un sol normal. Je n'ai aucune capture de la valeur
+          // lue au-dessus d'un vide (escalier). Le seuil de 60mm ci-dessous
+          // est une marge de securite arbitraire (3x la valeur "sol normal"
+          // observee) - A CALIBRER : souleve le robot au-dessus du vide en
+          // TestMode, note la valeur DropSensor lue, et ajuste
+          // DROP_SENSOR_THRESHOLD_MM en consequence AVANT de faire confiance
+          // a cette protection pour un vrai escalier.
+          else if (command == "GetAnalogSensors") {
+            static const int DROP_SENSOR_THRESHOLD_MM = 60;
+            bool cliff = false;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              // Format "Name,Unit,Value," (3 colonnes + virgule finale)
+              size_t c1 = line.find(',');
+              if (c1 == std::string::npos) continue;
+              size_t c2 = line.find(',', c1 + 1);
+              if (c2 == std::string::npos) continue;
+              size_t c3 = line.find(',', c2 + 1);
+
+              std::string key = line.substr(0, c1);
+              std::string value_str = (c3 == std::string::npos)
+                  ? line.substr(c2 + 1)
+                  : line.substr(c2 + 1, c3 - c2 - 1);
+              trim(key);
+              trim(value_str);
+
+              if (key == "DropSensorLeft" || key == "DropSensorRight") {
+                int value = atoi(value_str.c_str());
+                if (value > DROP_SENSOR_THRESHOLD_MM) cliff = true;
+              }
+            }
+
+            id(g_safety_cliff) = cliff;
+
+            if (cliff) {
+              id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+              id(g_safety_stop) = true;
+            }
+
+            // Publication MQTT du statut de securite complet (les 3 flags),
+            // qu'il y ait alerte ou non - permet au conteneur Docker de
+            // suivre l'etat en continu, pas seulement lors d'un declenchement.
+            char safety_payload[160];
+            int slen = snprintf(
+                safety_payload, sizeof(safety_payload),
+                "{\"bump\":%s,\"cliff\":%s,\"wheel_extended\":%s,\"stop\":%s,\"timestamp\":%.3f}",
+                id(g_safety_bump) ? "true" : "false",
+                id(g_safety_cliff) ? "true" : "false",
+                id(g_safety_wheel_extended) ? "true" : "false",
+                id(g_safety_stop) ? "true" : "false",
+                millis() / 1000.0
+            );
+            if (slen > 0 && slen < (int) sizeof(safety_payload)) {
+              id(neato_mqtt).publish(
+                  "${mqtt_safety_topic}",
+                  std::string(safety_payload, slen),
+                  1,     // QoS 1 : c'est de la securite, on veut que ca arrive
+                  false
+              );
+            }
+          }
+
           // ---- SLAM: GetLDSScan -> publie le scan LiDAR en MQTT (JSON) ----
           // IMPORTANT - non verifie sur un vrai robot :
           // Contrairement a GetMotor (capture reelle disponible dans
