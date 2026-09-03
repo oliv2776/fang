@@ -1,44 +1,34 @@
 # config/comp/slam-odom.yaml
 #
-# À inclure dans config/local.yaml (section "packages:") pour activer
-# la publication MQTT de l'odométrie ET du scan LiDAR consommées par
-# slam_bridge.py côté conteneur Docker.
+# À inclure dans config/local.yaml (section "packages:") pour activer :
+#   1. La publication MQTT de l'odométrie et du scan LiDAR consommées par
+#      slam_bridge.py côté conteneur Docker (voir config/comp/gen3.yaml
+#      pour le parsing GetMotor/GetLDSScan lui-même).
+#   2. La RÉCEPTION des commandes de vitesse produites par Nav2 (via MQTT,
+#      republiées par slam_bridge.py depuis le topic ROS2 /cmd_vel) et leur
+#      traduction en commandes SetMotor envoyées au Neato.
 #
-#   packages:
-#     ...
-#     - !include comp/slam-odom.yaml
+# HARDWARE CONFIRMÉ : un seul fil vers l'ESP32 (le port debug principal),
+# pas de second fil dédié au module LDS. GetMotor, GetLDSScan ET
+# maintenant SetMotor doivent tous les trois se PARTAGER le même bus UART
+# - le script ci-dessous les envoie en STRICTE ALTERNANCE (jamais deux en
+# même temps), sur 3 tours au lieu de 2 précédemment.
 #
-# Le parsing des réponses "GetMotor" et "GetLDSScan" elles-mêmes (extraction
-# des champs, construction du JSON, appel MQTT publish) est fait directement
-# dans config/comp/gen3.yaml, dans le même parseur UART que GetCharger/
-# GetState/etc. Ce fichier ajoute :
-#   1. Le composant mqtt: (broker) nécessaire au publish
-#   2. Le polling en ALTERNANCE de "GetMotor" et "GetLDSScan"
+# ⚠️ SÉCURITÉ - LIS CECI AVANT DE TESTER SetMotor SUR LE ROBOT :
+# La traduction cmd_vel -> SetMotor ci-dessous (calcul des distances par
+# roue, valeur de "Speed") est une hypothèse NON VÉRIFIÉE sur un vrai
+# robot, au même titre que le format GetLDSScan - mais ici les conséquences
+# d'une hypothèse fausse sont physiques (le robot part dans une direction
+# inattendue), pas juste une carte incohérente. Reste à portée de main du
+# bouton d'arrêt/de la prise du robot lors des premiers tests. Le calcul
+# suppose aussi que SetMotor accepte des distances négatives pour la
+# marche arrière - non confirmé, à vérifier en TestMode avant de faire
+# confiance à Nav2 pour du recul.
 #
-# HARDWARE CONFIRMÉ : un seul fil vers l'ESP32 (le port debug principal,
-# cf install-esp-device-gen3.md), pas de second fil dédié au module LDS.
-# En conséquence :
-#   - fang-custom/neato_lidar_stream.yaml (qui suppose un second uart
-#     "neato_uart" séparé, câblé directement sur le capteur) NE S'APPLIQUE
-#     PAS ici et ne doit pas être inclus - ni son composant custom C++
-#     fang-custom/components/neato_lidar/, qui de toute façon suppose un
-#     format binaire (paquets XV-11 22 octets) différent du JSON produit
-#     ici par le parsing texte de GetLDSScan.
-#   - GetMotor et GetLDSScan doivent se PARTAGER le même bus UART : on ne
-#     peut pas les envoyer en même temps sans corrompre les deux réponses.
-#     Le script ci-dessous les envoie donc en STRICTE ALTERNANCE (jamais
-#     les deux en même temps), pas en parallèle.
-#
-# DÉBIT ATTENDU - à mesurer sur ton robot, pas garanti :
-# GetLDSScan renvoie ~360 lignes texte (~5-7 Ko) à 115200 bauds : le
-# temps de transmission + parsing prend probablement plusieurs centaines
-# de ms à lui seul. Avec l'alternance stricte, attends-toi à un scan et
-# une odométrie environ toutes les 1-2 secondes, pas du 10Hz. C'est une
-# limite physique du montage à un seul fil : garde le robot lent pendant
-# le mapping pour limiter la dérive d'odométrie entre deux échantillons.
-# Si ça se révèle trop lent en pratique, la vraie solution est un second
-# fil câblé directement sur le module LDS (cf packet XV-11 natif, bien
-# plus rapide) plutôt que de pousser cette approche plus loin.
+# Si aucune commande cmd_vel fraîche n'arrive depuis plus de
+# cmd_vel_stale_timeout, le robot s'arrête automatiquement (SetMotor
+# LWheelDisable RWheelDisable) - protection contre une coupure réseau/MQTT/
+# Docker pendant que le robot roule.
 
 substitutions:
   # Doivent correspondre à MQTT_BROKER / MQTT_PORT / MQTT_PREFIX dans
@@ -47,11 +37,31 @@ substitutions:
   mqtt_port: "1883"
   mqtt_wheels_topic: "neato/robot/wheels"
   mqtt_scan_topic: "neato/robot/scan"
+  # Doit correspondre à CMD_VEL_OUT_TOPIC dans slam/.env (défaut aligné).
+  mqtt_cmd_vel_topic: "neato/robot/cmd_vel_out"
 
-  # Intervalle entre CHAQUE envoi (GetMotor puis GetLDSScan en alternance,
-  # donc un cycle complet des deux = 2x cette valeur). À ajuster à la
-  # hausse si les logs montrent des réponses tronquées/qui se chevauchent.
+  # Intervalle entre CHAQUE envoi (GetMotor, GetLDSScan, SetMotor tournent
+  # à tour de rôle, donc un cycle complet des trois = 3x cette valeur).
+  # À ajuster à la hausse si les logs montrent des réponses tronquées.
   slam_poll_interval: 800ms
+
+  # Si aucun message cmd_vel_out reçu depuis plus longtemps que ça,
+  # on considère la commande périmée et on arrête le robot par sécurité.
+  cmd_vel_stale_timeout: 2500ms
+
+  # Distance d'anticipation utilisée pour convertir une vitesse (m/s) en
+  # distance de roue (mm) à donner à SetMotor : on vise "assez pour tenir
+  # jusqu'au prochain tour de SetMotor" (~3x slam_poll_interval) avec de
+  # la marge, plutôt qu'une commande qui s'arrête juste avant la suivante.
+  setmotor_lookahead_s: "3.5"
+
+  # Empattement roue gauche/roue droite, en mètres - DOIT rester cohérent
+  # avec wheel_base_m dans slam_bridge.py (même valeur des deux côtés).
+  wheel_base_m: "0.248"
+
+  # Vitesse max envoyée à SetMotor, en mm/s - unité non confirmée (voir
+  # avertissement en tête de fichier), gardée volontairement basse.
+  setmotor_max_speed: "80"
 
 mqtt:
   - id: neato_mqtt
@@ -63,10 +73,44 @@ mqtt:
     discovery: false  # on ne veut pas polluer Home Assistant avec ce broker
 
 globals:
-  - id: g_slam_poll_toggle
-    type: bool
+  # 0 = GetMotor, 1 = GetLDSScan, 2 = SetMotor (round-robin 3 temps)
+  - id: g_slam_poll_step
+    type: int
     restore_value: false
-    initial_value: 'false'
+    initial_value: '0'
+
+  - id: g_cmd_linear_x
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: g_cmd_angular_z
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  # Timestamp (millis) du dernier cmd_vel_out reçu. 0 = jamais reçu.
+  - id: g_cmd_last_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+# ---- Réception des commandes de vitesse Nav2 (via MQTT, JSON) ----
+text_sensor:
+  - platform: mqtt_subscribe
+    id: cmd_vel_in
+    topic: ${mqtt_cmd_vel_topic}
+    on_value:
+      then:
+        - lambda: |-
+            // Payload attendu (publié par slam_bridge.py) :
+            //   {"linear_x": float, "angular_z": float, "timestamp": float}
+            json::parse_json(x, [](JsonObject root) -> bool {
+              if (!root.containsKey("linear_x") || !root.containsKey("angular_z"))
+                return false;
+              id(g_cmd_linear_x) = root["linear_x"].as<float>();
+              id(g_cmd_angular_z) = root["angular_z"].as<float>();
+              id(g_cmd_last_ms) = millis();
+              return true;
+            });
 
 script:
   # mode: single -> si un cycle précédent n'est pas terminé (ne devrait pas
@@ -75,14 +119,53 @@ script:
   - id: slam_poll_cycle
     mode: single
     then:
-      - if:
-          condition:
-            lambda: 'return id(g_slam_poll_toggle);'
-          then:
-            - uart.write: "GetLDSScan \n"
-          else:
-            - uart.write: "GetMotor \n"
-      - lambda: 'id(g_slam_poll_toggle) = !id(g_slam_poll_toggle);'
+      - lambda: |-
+          int step = id(g_slam_poll_step);
+          id(g_slam_poll_step) = (step + 1) % 3;
+
+          if (step == 0) {
+            id(uart_bus).write_str("GetMotor \n");
+            return;
+          }
+          if (step == 1) {
+            id(uart_bus).write_str("GetLDSScan \n");
+            return;
+          }
+
+          // step == 2 : SetMotor, traduit depuis le dernier cmd_vel reçu
+          uint32_t now = millis();
+          bool stale = (id(g_cmd_last_ms) == 0) ||
+                       (now - id(g_cmd_last_ms) > ${cmd_vel_stale_timeout});
+
+          float lin = stale ? 0.0f : id(g_cmd_linear_x);
+          float ang = stale ? 0.0f : id(g_cmd_angular_z);
+
+          // Arrêt franc si rien à faire (pas de cmd_vel frais, ou cmd_vel nul)
+          if (stale || (fabsf(lin) < 0.005f && fabsf(ang) < 0.01f)) {
+            id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+            return;
+          }
+
+          float wheel_base = ${wheel_base_m};
+          float v_left  = lin - ang * wheel_base / 2.0f;
+          float v_right = lin + ang * wheel_base / 2.0f;
+
+          float lookahead = ${setmotor_lookahead_s};
+          long dist_left_mm  = (long)(v_left  * lookahead * 1000.0f);
+          long dist_right_mm = (long)(v_right * lookahead * 1000.0f);
+
+          float speed = fmaxf(fabsf(v_left), fabsf(v_right)) * 1000.0f;
+          float max_speed = ${setmotor_max_speed};
+          if (speed > max_speed) speed = max_speed;
+          if (speed < 10.0f) speed = 10.0f;  // plancher pour ne pas envoyer Speed 0 (ignoré par le robot)
+
+          char cmd[96];
+          int len = snprintf(cmd, sizeof(cmd),
+                              "SetMotor RWheelDist %ld LWheelDist %ld Speed %d \n",
+                              dist_right_mm, dist_left_mm, (int) speed);
+          if (len > 0 && len < (int) sizeof(cmd)) {
+            id(uart_bus).write_str(std::string(cmd, len));
+          }
 
 interval:
   - interval: ${slam_poll_interval}
