@@ -129,6 +129,7 @@ class NeatoZoneMapCard extends HTMLElement {
           <button id="btnDiagnose" class="secondary">Lancer le diagnostic</button>
           <button id="btnScan" class="secondary">Scanner (maj carte)</button>
           <button id="btnExplore" class="secondary">Explorer automatiquement</button>
+          <button id="btnDock" class="secondary">Retour au socle</button>
           <button id="btnToggleDrive" class="secondary">Conduite manuelle</button>
         </div>
         <canvas id="mapCanvas" width="600" height="600"></canvas>
@@ -182,6 +183,7 @@ class NeatoZoneMapCard extends HTMLElement {
     this.shadowRoot.getElementById('btnSaveZone').addEventListener('click', () => this._saveZone());
     this.shadowRoot.getElementById('btnScan').addEventListener('click', () => this._startScan());
     this.shadowRoot.getElementById('btnExplore').addEventListener('click', () => this._startExplore());
+    this.shadowRoot.getElementById('btnDock').addEventListener('click', () => this._returnToDock());
     this.shadowRoot.getElementById('btnToggleDrive').addEventListener('click', () => this._toggleDrivePad());
     this._wireDriveButton('drvUp', 0.1, 0);
     this._wireDriveButton('drvDown', -0.1, 0);
@@ -373,6 +375,20 @@ class NeatoZoneMapCard extends HTMLElement {
     }
   }
 
+  async _returnToDock() {
+    // ⚠️ Navigation approximative vers la position de départ, PAS le
+    // retour au socle natif du Neato (pas d'alignement précis sur les
+    // contacts de charge garanti) - vérifie visuellement à l'arrivée.
+    this._setStatus('Retour au socle en cours (approximatif, à vérifier)...');
+    try {
+      const res = await fetch(`${this._apiBase}/api/dock/return`, { method: 'POST' });
+      const data = await res.json();
+      this._setStatus(res.ok ? 'Retour au socle lancé' : `Erreur: ${data.error || res.status}`);
+    } catch (e) {
+      this._setStatus(`Erreur d'envoi: ${e.message}`);
+    }
+  }
+
   async _startScan() {
     // Reparcourt la carte déjà connue SANS activer brosse/aspirateur -
     // pour mettre à jour la carte après avoir déplacé des meubles.
@@ -443,6 +459,7 @@ class NeatoZoneMapCard extends HTMLElement {
         fetch(`${this._apiBase}/api/clean/stop`, { method: 'POST' }),
         fetch(`${this._apiBase}/api/scan/stop`, { method: 'POST' }),
         fetch(`${this._apiBase}/api/explore/stop`, { method: 'POST' }),
+        fetch(`${this._apiBase}/api/dock/stop`, { method: 'POST' }),
       ]);
       this._setStatus('Arrêt demandé');
     } catch (e) {
