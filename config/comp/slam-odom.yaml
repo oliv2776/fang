@@ -336,7 +336,7 @@ script:
             // (perdue/tronquée) - on force la reprise plutôt que de
             // rester bloqué indéfiniment (ça couperait aussi la
             // surveillance sécurité).
-            ESP_LOGW("uart_parser", "Timeout en attente de reponse UART (%u ms), on force la reprise", waited);
+            ESP_LOGW("uart_parser", "Timeout en attente de reponse UART (%u ms), on force la reprise", (unsigned int) waited);
             id(g_awaiting_response) = false;
           }
 
