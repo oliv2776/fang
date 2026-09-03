@@ -2,8 +2,6 @@
 
 Dépôt : https://github.com/oliv2776/fang — fork de [vacuula/fang](https://github.com/vacuula/fang) *(Neato Brainslug)*
 
-> Cette version de la documentation a été rédigée à partir du **contenu réel du dépôt** (archive ZIP complète), et non plus seulement de l'interface web GitHub. Tous les extraits de commandes/configuration ci-dessous viennent directement des fichiers du projet (`slam/`, `config/`, `webserver/`, `HomeAssistant/`, `*.md`).
-
 ---
 
 ## Vue d'ensemble
