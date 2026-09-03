@@ -35,11 +35,14 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.time import Time
 
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import Bool, String
-from nav2_msgs.action import FollowWaypoints
+from nav2_msgs.action import FollowWaypoints, NavigateToPose
+from tf2_ros import Buffer, TransformListener
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 try:
     import paho.mqtt.client as mqtt
@@ -70,13 +73,30 @@ class CoveragePlanner(Node):
         self._safety_stop = False
         self._active_goal_handle = None
         self._running = False
+        self._scan_only = False
+
+        # --- Exploration automatique (frontières) ---
+        self.min_frontier_area_m2 = float(self.declare_parameter('min_frontier_area_m2', 0.3).value)
+        self.max_explore_iterations = int(self.declare_parameter('max_explore_iterations', 300).value)
+        self._exploring = False
+        self._explore_iterations = 0
+        self._explore_blacklist = []  # frontières ayant échoué, évitées un moment
+        self._explore_goal_handle = None
+        self._current_explore_target = None
 
         self.create_subscription(OccupancyGrid, '/map', self._on_map, 10)
         self.create_subscription(Bool, '/safety_stop', self._on_safety_stop, 10)
         self.create_subscription(Bool, '/start_cleaning', self._on_start_cleaning, 10)
+        self.create_subscription(Bool, '/start_scan', self._on_start_scan, 10)
+        self.create_subscription(Bool, '/start_explore', self._on_start_explore, 10)
         self.create_subscription(String, '/clean_zone_request', self._on_zone_request, 10)
 
         self._waypoints_client = ActionClient(self, FollowWaypoints, 'follow_waypoints')
+        self._nav_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
+
+        # --- TF (pose robot, nécessaire pour choisir la frontière la plus proche) ---
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self._mqtt_client = None
         if HAS_MQTT:
@@ -137,6 +157,250 @@ class CoveragePlanner(Node):
         else:
             self._abort_cleaning()
 
+    def _on_start_scan(self, msg: Bool):
+        """Mode 'rescan' : reparcourt la zone déjà connue de la carte SANS
+        activer brosse/aspirateur - utile pour mettre à jour la carte après
+        avoir déplacé des meubles. NE FONCTIONNE PAS pour une toute
+        première carte (aucun waypoint généré si /map est vide) : pour ça,
+        utilise la téléopération manuelle (/api/teleop) à la place.
+        Assure-toi que SLAM_MODE=mapping (pas 'localize') côté .env pour
+        que slam_toolbox intègre vraiment les changements détectés,
+        sinon il se contentera de se localiser sur l'ancienne carte."""
+        if msg.data:
+            if self._safety_stop:
+                self.get_logger().error(
+                    "Démarrage refusé : safety_stop actif. Vérifie le robot et "
+                    "réarme-le (mqtt_clean_cmd_topic: clear_safety_stop) avant de relancer."
+                )
+                return
+            self._start_cleaning(scan_only=True)
+        else:
+            self._abort_cleaning()
+
+    # --------------------------------------------------- Exploration automatique
+    def _on_start_explore(self, msg: Bool):
+        """Exploration automatique par frontières : le robot repère les
+        limites entre zone connue et inconnue, va vers la plus proche,
+        répète jusqu'à ce qu'il n'y ait plus rien à explorer. Aucun
+        nettoyage, jamais de brosse/aspirateur. Fonctionne dès le premier
+        scan reçu (pas besoin d'une carte préexistante), contrairement au
+        mode scan/nettoyage classique - remplace la téléopération manuelle
+        pour la toute première carte dans la majorité des cas."""
+        if msg.data:
+            if self._safety_stop:
+                self.get_logger().error(
+                    "Démarrage refusé : safety_stop actif. Vérifie le robot et "
+                    "réarme-le (mqtt_clean_cmd_topic: clear_safety_stop) avant de relancer."
+                )
+                return
+            self._start_exploration()
+        else:
+            self._stop_exploration()
+
+    def _start_exploration(self):
+        if self._running or self._exploring:
+            self.get_logger().warn("Un cycle est déjà en cours, ignoré")
+            return
+        self._exploring = True
+        self._explore_iterations = 0
+        self._explore_blacklist = []
+        self.get_logger().info("Exploration automatique démarrée")
+        self._exploration_step()
+
+    def _stop_exploration(self):
+        self._exploring = False
+        if self._explore_goal_handle is not None:
+            try:
+                self._explore_goal_handle.cancel_goal_async()
+            except Exception as e:
+                self.get_logger().warn(f"Échec annulation objectif d'exploration: {e}")
+        self._explore_goal_handle = None
+        self.get_logger().info("Exploration arrêtée")
+
+    def _get_robot_pose(self):
+        try:
+            t = self.tf_buffer.lookup_transform('map', 'base_link', Time())
+            return t.transform.translation.x, t.transform.translation.y
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            return None
+
+    def _is_blacklisted(self, frontier, radius_m=0.5):
+        for b in self._explore_blacklist:
+            if (frontier["x"] - b["x"]) ** 2 + (frontier["y"] - b["y"]) ** 2 < radius_m ** 2:
+                return True
+        return False
+
+    def _exploration_step(self):
+        if not self._exploring:
+            return
+        if self._safety_stop:
+            self.get_logger().error("Exploration interrompue : safety_stop actif")
+            self._exploring = False
+            return
+
+        self._explore_iterations += 1
+        if self._explore_iterations > self.max_explore_iterations:
+            self.get_logger().warn(
+                f"Exploration arrêtée : limite de {self.max_explore_iterations} "
+                f"étapes atteinte (carte trop grande, ou boucle sur des "
+                f"frontières inatteignables ?)"
+            )
+            self._exploring = False
+            return
+
+        with self._map_lock:
+            map_msg = self._map
+        if map_msg is None:
+            self.get_logger().error(
+                "Aucun scan reçu pour l'instant, impossible de démarrer "
+                "l'exploration (vérifie que GetLDSScan fonctionne)"
+            )
+            self._exploring = False
+            return
+
+        margin_cells = max(1, int(round(self.robot_radius_m / map_msg.info.resolution)))
+        data = np.array(map_msg.data, dtype=np.int16).reshape((map_msg.info.height, map_msg.info.width))
+        # Important : la marge de sécurité pour l'exploration ne doit
+        # écarter le robot que des vrais OBSTACLES (data >= 50), pas de
+        # l'inconnu - sinon toute cellule "frontière" (par définition
+        # voisine de l'inconnu) se fait éroder et il n'y a plus jamais
+        # rien à explorer. C'est différent de _generate_coverage_waypoints
+        # qui érode par rapport à "libre" (incluant l'inconnu comme
+        # obstacle), ce qui est correct pour NE PAS nettoyer dans
+        # l'inconnu, mais faux pour trouver où explorer.
+        not_obstacle = data < 50
+        safe = self._erode_free(not_obstacle, margin_cells)
+
+        frontiers = self._find_frontiers(map_msg, safe)
+        frontiers = [f for f in frontiers if not self._is_blacklisted(f)]
+
+        if not frontiers:
+            self.get_logger().info(
+                f"Exploration terminée : plus de frontière à explorer "
+                f"({self._explore_iterations} étape(s))"
+            )
+            self._exploring = False
+            return
+
+        pose = self._get_robot_pose()
+        if pose is None:
+            self.get_logger().warn("Pose robot indisponible (TF pas encore prête), nouvel essai dans 2s")
+            threading.Timer(2.0, self._exploration_step).start()
+            return
+
+        rx, ry = pose
+        frontiers.sort(key=lambda f: (f["x"] - rx) ** 2 + (f["y"] - ry) ** 2)
+        target = frontiers[0]
+        self._current_explore_target = target
+
+        goal = NavigateToPose.Goal()
+        goal.pose.header.frame_id = 'map'
+        goal.pose.pose.position.x = target["x"]
+        goal.pose.pose.position.y = target["y"]
+        goal.pose.pose.orientation.w = 1.0
+
+        if not self._nav_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().error("Action navigate_to_pose indisponible (Nav2 lancé ? NAV2_ENABLED=true ?)")
+            self._exploring = False
+            return
+
+        self.get_logger().info(
+            f"Exploration [{self._explore_iterations}/{self.max_explore_iterations}] : "
+            f"frontière la plus proche à ({target['x']:.2f}, {target['y']:.2f}), "
+            f"taille ~{target['size']:.2f}m²"
+        )
+
+        send_future = self._nav_client.send_goal_async(goal)
+        send_future.add_done_callback(self._on_explore_goal_response)
+
+    def _on_explore_goal_response(self, future):
+        if not self._exploring:
+            return
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().warn("Objectif d'exploration refusé par Nav2, frontière ignorée")
+            self._blacklist_current_target()
+            self._exploration_step()
+            return
+        self._explore_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_explore_result)
+
+    def _on_explore_result(self, future):
+        self._explore_goal_handle = None
+        try:
+            future.result()
+        except Exception as e:
+            self.get_logger().warn(f"Objectif d'exploration échoué/annulé: {e}")
+            self._blacklist_current_target()
+
+        if not self._exploring:
+            return
+        # Petite pause pour laisser la carte se mettre à jour avant de
+        # recalculer les frontières sur des données fraîches.
+        threading.Timer(1.5, self._exploration_step).start()
+
+    def _blacklist_current_target(self):
+        if self._current_explore_target is not None:
+            self._explore_blacklist.append(self._current_explore_target)
+
+    def _find_frontiers(self, map_msg: OccupancyGrid, safe_mask: np.ndarray):
+        """Renvoie la liste des groupes de cellules "frontière" (libres,
+        sûres, et adjacentes à de l'inconnu), sous forme de
+        [{"x":.., "y":.., "size":..(m²)}]. Regroupement par parcours en
+        largeur (BFS) pur Python/numpy, pas de dépendance scipy."""
+        info = map_msg.info
+        w, h, res = info.width, info.height, info.resolution
+        data = np.array(map_msg.data, dtype=np.int16).reshape((h, w))
+        unknown = data < 0
+
+        def shift(arr, dy, dx):
+            out = np.zeros_like(arr)
+            y0, y1 = max(0, dy), h + min(0, dy)
+            x0, x1 = max(0, dx), w + min(0, dx)
+            sy0, sy1 = max(0, -dy), h + min(0, -dy)
+            sx0, sx1 = max(0, -dx), w + min(0, -dx)
+            if y1 > y0 and x1 > x0:
+                out[y0:y1, x0:x1] = arr[sy0:sy1, sx0:sx1]
+            return out
+
+        adj_unknown = shift(unknown, 1, 0) | shift(unknown, -1, 0) | shift(unknown, 0, 1) | shift(unknown, 0, -1)
+        free = (data >= 0) & (data < 50)
+        frontier_mask = free & safe_mask & adj_unknown
+
+        min_cells = max(1, int(self.min_frontier_area_m2 / (res * res)))
+        visited = np.zeros_like(frontier_mask)
+        clusters = []
+        ys, xs = np.where(frontier_mask)
+        for y0, x0 in zip(ys.tolist(), xs.tolist()):
+            if visited[y0, x0]:
+                continue
+            stack = [(y0, x0)]
+            visited[y0, x0] = True
+            cells = []
+            while stack:
+                cy, cx = stack.pop()
+                cells.append((cy, cx))
+                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < h and 0 <= nx < w and frontier_mask[ny, nx] and not visited[ny, nx]:
+                        visited[ny, nx] = True
+                        stack.append((ny, nx))
+            if len(cells) >= min_cells:
+                cy_avg = sum(c[0] for c in cells) / len(cells)
+                cx_avg = sum(c[1] for c in cells) / len(cells)
+                # Le centroïde géométrique peut tomber HORS du cluster pour
+                # une frontière en anneau (ex: zone isolée entourée
+                # d'inconnu de tous les côtés) - on vise donc la vraie
+                # cellule du cluster la plus proche du centroïde, jamais un
+                # point fictif qui ne serait même pas une frontière.
+                best_cell = min(cells, key=lambda c: (c[0] - cy_avg) ** 2 + (c[1] - cx_avg) ** 2)
+                cy, cx = best_cell
+                wx = info.origin.position.x + (cx + 0.5) * res
+                wy = info.origin.position.y + (cy + 0.5) * res
+                clusters.append({"x": wx, "y": wy, "size": len(cells) * res * res})
+        return clusters
+
     def _on_zone_request(self, msg: String):
         """Reçoit un polygone à nettoyer, payload JSON :
         {"polygon": [[x1,y1],[x2,y2],[x3,y3],...]} en coordonnées monde
@@ -160,15 +424,19 @@ class CoveragePlanner(Node):
         self._start_cleaning(polygon=polygon)
 
     # ------------------------------------------------------------- Cycle nettoyage
-    def _start_cleaning(self, polygon=None):
+    def _start_cleaning(self, polygon=None, scan_only=False):
         if self._running:
-            self.get_logger().warn("Un cycle de nettoyage est déjà en cours, ignoré")
+            self.get_logger().warn("Un cycle est déjà en cours, ignoré")
             return
 
         with self._map_lock:
             map_msg = self._map
         if map_msg is None:
-            self.get_logger().error("Pas de carte disponible pour l'instant, annulé")
+            self.get_logger().error(
+                "Pas de carte disponible pour l'instant, annulé - pour une "
+                "toute première carte, utilise la téléopération manuelle "
+                "(/api/teleop) plutôt que ce mode."
+            )
             return
 
         waypoints = self._generate_coverage_waypoints(map_msg, polygon=polygon)
@@ -179,8 +447,9 @@ class CoveragePlanner(Node):
             )
             return
 
+        mode_desc = "scan seul, pas de nettoyage" if scan_only else "nettoyage"
         zone_desc = f"zone ({len(polygon)} points)" if polygon else "carte entière"
-        self.get_logger().info(f"Cycle de nettoyage [{zone_desc}] : {len(waypoints)} points de passage")
+        self.get_logger().info(f"Cycle [{mode_desc}, {zone_desc}] : {len(waypoints)} points de passage")
 
         if not self._waypoints_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error("Action follow_waypoints indisponible (Nav2 lancé ? NAV2_ENABLED=true ?)")
@@ -190,7 +459,9 @@ class CoveragePlanner(Node):
         goal.poses = waypoints
 
         self._running = True
-        self._publish_clean_cmd(True)
+        self._scan_only = scan_only
+        if not scan_only:
+            self._publish_clean_cmd(True)
 
         send_future = self._waypoints_client.send_goal_async(
             goal, feedback_callback=self._on_waypoints_feedback
@@ -202,7 +473,8 @@ class CoveragePlanner(Node):
         if not goal_handle.accepted:
             self.get_logger().error("Objectif de couverture refusé par Nav2")
             self._running = False
-            self._publish_clean_cmd(False)
+            if not self._scan_only:
+                self._publish_clean_cmd(False)
             return
         self._active_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
@@ -216,19 +488,22 @@ class CoveragePlanner(Node):
         try:
             result = future.result().result
             missed = list(result.missed_waypoints)
+            label = "scan" if self._scan_only else "nettoyage"
             if missed:
-                self.get_logger().warn(f"Cycle terminé, {len(missed)} point(s) manqué(s): {missed}")
+                self.get_logger().warn(f"Cycle [{label}] terminé, {len(missed)} point(s) manqué(s): {missed}")
             else:
-                self.get_logger().info("Cycle de nettoyage terminé, tous les points couverts")
+                self.get_logger().info(f"Cycle [{label}] terminé, tous les points couverts")
         except Exception as e:
             self.get_logger().warn(f"Cycle terminé avec erreur/annulation: {e}")
         finally:
             self._running = False
             self._active_goal_handle = None
-            self._publish_clean_cmd(False)
+            if not self._scan_only:
+                self._publish_clean_cmd(False)
 
     def _abort_cleaning(self):
-        self._publish_clean_cmd(False)
+        if not self._scan_only:
+            self._publish_clean_cmd(False)
         if self._active_goal_handle is not None:
             try:
                 self._active_goal_handle.cancel_goal_async()
