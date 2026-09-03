@@ -7,7 +7,7 @@ SLAM Neato D7 gen3, sans dépendre de ROS2/Docker (juste MQTT + paho-mqtt).
 qui peut joindre le broker MQTT) :
 
     pip3 install paho-mqtt --break-system-packages   # si pas déjà installé
-    python3 diagnose.py --broker 192.168.10.126
+    python3 diagnose.py --broker 192.168.10.108
 
 Ce script fait deux choses :
   1. MODE ÉCOUTE (par défaut) : s'abonne à tous les topics neato/robot/*,
@@ -31,6 +31,7 @@ import json
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 try:
     import paho.mqtt.client as mqtt
@@ -58,6 +59,28 @@ def warn(text):
 
 def err(text):
     return color(text, "31")
+
+
+def read_env_default(key: str, fallback: str) -> str:
+    """Lit une valeur depuis slam/.env si le fichier existe (même dossier
+    que ce script), sinon renvoie fallback. Parseur minimal (KEY=VALUE),
+    pas de dépendance à python-dotenv. Permet à ce script autonome de
+    rester synchronisé avec le même .env que docker-compose, sans avoir
+    à maintenir une valeur par défaut séparée à la main."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return fallback
+    try:
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, _, v = line.partition('=')
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return fallback
 
 
 class Diagnostics:
@@ -220,9 +243,11 @@ def guided_mode(diag: Diagnostics):
 
 def main():
     parser = argparse.ArgumentParser(description="Diagnostic MQTT du pipeline SLAM Neato")
-    parser.add_argument("--broker", default="192.168.10.126", help="IP du broker MQTT")
-    parser.add_argument("--port", type=int, default=1883)
-    parser.add_argument("--prefix", default="neato/robot", help="Doit matcher MQTT_PREFIX")
+    parser.add_argument("--broker", default=read_env_default("MQTT_BROKER", "192.168.10.108"),
+                         help="IP du broker MQTT (lu depuis slam/.env si présent)")
+    parser.add_argument("--port", type=int, default=int(read_env_default("MQTT_PORT", "1883")))
+    parser.add_argument("--prefix", default=read_env_default("MQTT_PREFIX", "neato/robot"),
+                         help="Doit matcher MQTT_PREFIX")
     parser.add_argument("--guided", action="store_true", help="Lance le mode test guidé (commande par commande)")
     args = parser.parse_args()
 

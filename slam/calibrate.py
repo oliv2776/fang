@@ -9,7 +9,7 @@ vers des globals ESPHome persistés en flash (pas besoin de reflasher entre
 deux essais, ni après - elles survivent au redémarrage de l'ESP32).
 
     pip3 install paho-mqtt --break-system-packages   # si pas déjà fait
-    python3 calibrate.py --broker 192.168.10.126
+    python3 calibrate.py --broker 192.168.10.108
 
 Trois étapes, chacune indépendante (tu peux Ctrl+C entre deux sans casser
 ce qui a déjà été calibré) :
@@ -26,6 +26,7 @@ import statistics
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 try:
     import paho.mqtt.client as mqtt
@@ -46,6 +47,27 @@ def color(text, code):
 def ok(t): return color(t, "32")
 def warn(t): return color(t, "33")
 def err(t): return color(t, "31")
+
+
+def read_env_default(key: str, fallback: str) -> str:
+    """Lit une valeur depuis slam/.env si le fichier existe (même dossier
+    que ce script), sinon renvoie fallback. Voir diagnose.py pour la même
+    fonction - dupliquée ici pour garder ces deux scripts autonomes
+    (pas de module partagé entre les deux, volontairement simple)."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return fallback
+    try:
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            k, _, v = line.partition('=')
+            if k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return fallback
 
 
 class Calibrator:
@@ -320,9 +342,9 @@ def calibrate_wheel_base(cal: Calibrator):
 
 def main():
     parser = argparse.ArgumentParser(description="Calibration guidée Neato D7 gen3")
-    parser.add_argument("--broker", default="192.168.10.126")
-    parser.add_argument("--port", type=int, default=1883)
-    parser.add_argument("--prefix", default="neato/robot")
+    parser.add_argument("--broker", default=read_env_default("MQTT_BROKER", "192.168.10.108"))
+    parser.add_argument("--port", type=int, default=int(read_env_default("MQTT_PORT", "1883")))
+    parser.add_argument("--prefix", default=read_env_default("MQTT_PREFIX", "neato/robot"))
     parser.add_argument("--skip-wheel-base", action="store_true",
                          help="Ne propose même pas l'étape 3 (expérimentale)")
     args = parser.parse_args()
