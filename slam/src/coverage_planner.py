@@ -62,6 +62,23 @@ class CoveragePlanner(Node):
         self.row_spacing_m = float(self.declare_parameter('row_spacing_m', 0.32).value)
         self.min_segment_m = float(self.declare_parameter('min_segment_m', 0.25).value)
 
+        # --- Replanification incrémentale pendant le nettoyage ---
+        # Au lieu de calculer tout le parcours une fois pour toutes, on
+        # envoie de petits lots de points, et on RECALCULE à partir d'une
+        # carte fraîche entre deux lots - ce qui permet de prendre en
+        # compte un meuble déplacé (nouvel obstacle évité au recalcul
+        # suivant, espace libéré ajouté au parcours restant).
+        self.replanning_batch_size = int(self.declare_parameter('replanning_batch_size', 8).value)
+        # Rayon (m) marqué "déjà couvert" autour de chaque point de passage
+        # atteint - APPROXIMATIF : ne garantit pas que le sol a été
+        # physiquement brossé sur toute la ligne entre deux points (surtout
+        # pour les sauts entre segments/lignes différents, pas juste un
+        # aller-retour en ligne droite), mais évite de revenir sans cesse
+        # sur une zone déjà traversée.
+        self.coverage_mark_radius_m = float(
+            self.declare_parameter('coverage_mark_radius_m', self.row_spacing_m / 2).value
+        )
+
         self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.126').value
         self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
         self.mqtt_clean_cmd_topic = self.declare_parameter(
@@ -74,6 +91,9 @@ class CoveragePlanner(Node):
         self._active_goal_handle = None
         self._running = False
         self._scan_only = False
+        self._clean_polygon = None
+        self._covered_points = []
+        self._current_batch = []
 
         # --- Exploration automatique (frontières) ---
         self.min_frontier_area_m2 = float(self.declare_parameter('min_frontier_area_m2', 0.3).value)
@@ -434,72 +454,138 @@ class CoveragePlanner(Node):
         if map_msg is None:
             self.get_logger().error(
                 "Pas de carte disponible pour l'instant, annulé - pour une "
-                "toute première carte, utilise la téléopération manuelle "
-                "(/api/teleop) plutôt que ce mode."
+                "toute première carte, utilise l'exploration automatique ou "
+                "la téléopération manuelle (/api/teleop) plutôt que ce mode."
             )
             return
-
-        waypoints = self._generate_coverage_waypoints(map_msg, polygon=polygon)
-        if not waypoints:
-            self.get_logger().error(
-                "Aucun waypoint de couverture généré (carte vide, zone trop petite, "
-                "ou zone entièrement hors des zones connues comme libres)"
-            )
-            return
-
-        mode_desc = "scan seul, pas de nettoyage" if scan_only else "nettoyage"
-        zone_desc = f"zone ({len(polygon)} points)" if polygon else "carte entière"
-        self.get_logger().info(f"Cycle [{mode_desc}, {zone_desc}] : {len(waypoints)} points de passage")
 
         if not self._waypoints_client.wait_for_server(timeout_sec=5.0):
             self.get_logger().error("Action follow_waypoints indisponible (Nav2 lancé ? NAV2_ENABLED=true ?)")
             return
 
-        goal = FollowWaypoints.Goal()
-        goal.poses = waypoints
-
         self._running = True
         self._scan_only = scan_only
+        self._clean_polygon = polygon
+        self._covered_points = []
+
+        mode_desc = "scan seul, pas de nettoyage" if scan_only else "nettoyage"
+        zone_desc = f"zone ({len(polygon)} points)" if polygon else "carte entière"
+        self.get_logger().info(
+            f"Cycle [{mode_desc}, {zone_desc}] démarré - replanification "
+            f"par lots de {self.replanning_batch_size} points"
+        )
+
         if not scan_only:
             self._publish_clean_cmd(True)
+
+        self._cleaning_step()
+
+    def _cleaning_step(self):
+        """Un 'pas' du cycle : recalcule le parcours restant à partir d'une
+        carte FRAÎCHE (donc réagit aux meubles déplacés depuis le dernier
+        pas), envoie le prochain petit lot de points, et se rappelle
+        lui-même une fois ce lot terminé."""
+        if not self._running:
+            return
+        if self._safety_stop:
+            self.get_logger().error("Cycle interrompu : safety_stop actif")
+            self._abort_cleaning()
+            return
+
+        with self._map_lock:
+            map_msg = self._map
+        if map_msg is None:
+            self.get_logger().error("Carte devenue indisponible, arrêt du cycle")
+            self._running = False
+            if not self._scan_only:
+                self._publish_clean_cmd(False)
+            return
+
+        remaining = self._generate_coverage_waypoints(
+            map_msg, polygon=self._clean_polygon, exclude_points=self._covered_points
+        )
+
+        if not remaining:
+            label = "scan" if self._scan_only else "nettoyage"
+            self.get_logger().info(
+                f"Cycle [{label}] terminé : plus de zone accessible non couverte "
+                f"({len(self._covered_points)} point(s) de passage au total)"
+            )
+            self._running = False
+            if not self._scan_only:
+                self._publish_clean_cmd(False)
+            return
+
+        batch = remaining[: self.replanning_batch_size]
+        self._current_batch = batch
+
+        goal = FollowWaypoints.Goal()
+        goal.poses = [self._make_pose(x, y) for (x, y, _connect) in batch]
 
         send_future = self._waypoints_client.send_goal_async(
             goal, feedback_callback=self._on_waypoints_feedback
         )
-        send_future.add_done_callback(self._on_goal_response)
+        send_future.add_done_callback(self._on_cleaning_goal_response)
 
-    def _on_goal_response(self, future):
+    def _on_cleaning_goal_response(self, future):
+        if not self._running:
+            return
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().error("Objectif de couverture refusé par Nav2")
+            self.get_logger().error("Lot refusé par Nav2, arrêt du cycle")
             self._running = False
             if not self._scan_only:
                 self._publish_clean_cmd(False)
             return
         self._active_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._on_result)
+        result_future.add_done_callback(self._on_cleaning_batch_result)
 
     def _on_waypoints_feedback(self, feedback_msg):
         if self._safety_stop:
             self._abort_cleaning()
 
-    def _on_result(self, future):
+    def _on_cleaning_batch_result(self, future):
+        self._active_goal_handle = None
         try:
-            result = future.result().result
-            missed = list(result.missed_waypoints)
-            label = "scan" if self._scan_only else "nettoyage"
-            if missed:
-                self.get_logger().warn(f"Cycle [{label}] terminé, {len(missed)} point(s) manqué(s): {missed}")
-            else:
-                self.get_logger().info(f"Cycle [{label}] terminé, tous les points couverts")
+            future.result()
+            # Qu'un point du lot ait été manqué ou non, on le marque quand
+            # même "couvert" pour ne pas boucler indéfiniment dessus - une
+            # frontière/segment inatteignable serait sinon reproposé à
+            # chaque replanification.
+            self._mark_covered(self._current_batch)
         except Exception as e:
-            self.get_logger().warn(f"Cycle terminé avec erreur/annulation: {e}")
-        finally:
-            self._running = False
-            self._active_goal_handle = None
-            if not self._scan_only:
-                self._publish_clean_cmd(False)
+            self.get_logger().warn(f"Lot terminé avec erreur/annulation: {e}")
+            self._mark_covered(self._current_batch)
+
+        if not self._running:
+            return
+        # Petite pause pour laisser la carte se mettre à jour (nouveau
+        # scan reçu) avant de recalculer le parcours restant.
+        threading.Timer(1.0, self._cleaning_step).start()
+
+    def _mark_covered(self, batch):
+        """Marque comme couverte toute la ligne entre points consécutifs
+        du lot QUAND c'est un vrai balayage en ligne droite (connect_to_prev
+        True, même segment) - pour les sauts entre segments/lignes, on ne
+        marque que le point d'arrivée, pas toute la distance parcourue par
+        Nav2 pour y aller (qui ne suit pas forcément une ligne droite)."""
+        if not batch:
+            return
+        pts = []
+        prev_xy = None
+        for (x, y, connect) in batch:
+            if connect and prev_xy is not None:
+                x0, y0 = prev_xy
+                dist = math.hypot(x - x0, y - y0)
+                steps = max(1, int(dist / max(self.coverage_mark_radius_m, 0.01)))
+                for s in range(1, steps + 1):
+                    t = s / steps
+                    pts.append((x0 + (x - x0) * t, y0 + (y - y0) * t))
+            else:
+                pts.append((x, y))
+            prev_xy = (x, y)
+        self._covered_points.extend(pts)
 
     def _abort_cleaning(self):
         if not self._scan_only:
@@ -512,7 +598,9 @@ class CoveragePlanner(Node):
         self._running = False
 
     # ------------------------------------------------------- Génération du parcours
-    def _generate_coverage_waypoints(self, map_msg: OccupancyGrid, polygon=None):
+    def _generate_coverage_waypoints(self, map_msg: OccupancyGrid, polygon=None, exclude_points=None):
+        """Renvoie une liste de tuples (x, y) monde (PAS des PoseStamped -
+        conversion via _make_pose au moment d'envoyer un lot à Nav2)."""
         info = map_msg.info
         w, h, res = info.width, info.height, info.resolution
         if w == 0 or h == 0:
@@ -530,6 +618,10 @@ class CoveragePlanner(Node):
             zone_mask = self._polygon_mask(polygon, info, w, h)
             safe = safe & zone_mask
 
+        if exclude_points:
+            covered = self._covered_mask_for(info, w, h, exclude_points, self.coverage_mark_radius_m)
+            safe = safe & ~covered
+
         row_spacing_cells = max(1, int(round(self.row_spacing_m / res)))
         min_segment_cells = max(1, int(round(self.min_segment_m / res)))
 
@@ -543,13 +635,39 @@ class CoveragePlanner(Node):
                 segments = list(reversed(segments))
             for (col_start, col_end) in segments:
                 cols = (col_end, col_start) if reverse else (col_start, col_end)
+                connect_to_prev = False  # 1er point d'un segment = un saut, pas un balayage
                 for col in cols:
                     wx = info.origin.position.x + (col + 0.5) * res
                     wy = info.origin.position.y + (row + 0.5) * res
-                    waypoints.append(self._make_pose(wx, wy))
+                    # Le 3e élément indique si ce point est relié au
+                    # précédent par un VRAI balayage en ligne droite (même
+                    # segment) plutôt qu'un saut vers un autre segment/ligne
+                    # - _mark_covered s'en sert pour ne pas marquer comme
+                    # "couvert" tout l'espace traversé par un saut (qui suit
+                    # le chemin de Nav2, pas une ligne droite).
+                    waypoints.append((wx, wy, connect_to_prev))
+                    connect_to_prev = True
             reverse = not reverse
 
         return waypoints
+
+    @staticmethod
+    def _covered_mask_for(info, w: int, h: int, points, radius_m: float) -> np.ndarray:
+        """Masque booléen (h, w) : True pour les cellules à moins de
+        radius_m d'au moins un des points donnés (coordonnées monde)."""
+        if not points:
+            return np.zeros((h, w), dtype=bool)
+        res = info.resolution
+        cols = np.arange(w)
+        rows = np.arange(h)
+        wx = info.origin.position.x + (cols + 0.5) * res
+        wy = info.origin.position.y + (rows + 0.5) * res
+        WX, WY = np.meshgrid(wx, wy)
+        mask = np.zeros((h, w), dtype=bool)
+        r2 = radius_m * radius_m
+        for (px, py) in points:
+            mask |= (WX - px) ** 2 + (WY - py) ** 2 <= r2
+        return mask
 
     @staticmethod
     def _polygon_mask(polygon_world, info, w: int, h: int) -> np.ndarray:
