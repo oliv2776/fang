@@ -37,8 +37,10 @@ from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
 from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
+import diagnostics
+
 try:
-    from flask import Flask, jsonify, request
+    from flask import Flask, jsonify, request, Response
     from flask_cors import CORS
     HAS_FLASK = True
 except ImportError:
@@ -61,6 +63,9 @@ class SlamServer(Node):
         self.map_frame = self.declare_parameter('map_frame', 'map').value
         self.base_frame = self.declare_parameter('base_frame', 'base_link').value
         self.pose_poll_rate = float(self.declare_parameter('pose_poll_rate', 10.0).value)
+        self.mqtt_broker = self.declare_parameter('mqtt_broker', '192.168.10.126').value
+        self.mqtt_port = int(self.declare_parameter('mqtt_port', 1883).value)
+        self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
 
         # --- État (protégé par _lock) ---
         self._map = None
@@ -251,8 +256,32 @@ class SlamServer(Node):
             self.zone_pub.publish(msg)
             return jsonify({"status": "zone_cleaning_requested", "points": len(polygon)})
 
+        @app.route('/api/diagnose/run', methods=['POST'])
+        def run_diagnose():
+            # Bloquant ~15s (4 commandes x 3s + connexion) - c'est voulu,
+            # le navigateur/HA attend simplement la fin avant de proposer
+            # le téléchargement. Ne teste JAMAIS SetMotor (voir diagnostics.py).
+            fmt = request.args.get('format', 'md')
+            report = diagnostics.run_diagnostics(
+                self.mqtt_broker, self.mqtt_port, self.mqtt_prefix
+            )
+            filename_ts = time.strftime('%Y%m%d_%H%M%S')
+
+            if fmt == 'json':
+                body = json.dumps(report, indent=2, ensure_ascii=False)
+                mimetype = 'application/json'
+                filename = f"diagnostic_neato_{filename_ts}.json"
+            else:
+                body = diagnostics.report_to_markdown(report)
+                mimetype = 'text/markdown'
+                filename = f"diagnostic_neato_{filename_ts}.md"
+
+            resp = Response(body, mimetype=mimetype)
+            resp.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+            return resp
+
         t = threading.Thread(
-            target=lambda: app.run(host='0.0.0.0', port=self.rest_port, debug=False),
+            target=lambda: app.run(host='0.0.0.0', port=self.rest_port, debug=False, threaded=True),
             daemon=True,
         )
         t.start()
