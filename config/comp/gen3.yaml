@@ -194,14 +194,15 @@ globals:
     initial_value: ''
 
 
-interval:
-  - interval: ${infointerval}
-    then:
-      - uart.write: "GetErr \n"
-      - uart.write: "GetState \n"
-  - interval: ${chargerinterval}
-    then: 
-      - uart.write: "GetCharger \n"
+# ATTENTION : le bloc "interval:" qui envoyait GetErr/GetState/GetCharger
+# indépendamment (via infointerval/chargerinterval) a été retiré d'ici -
+# il tournait EN PARALLÈLE et SANS COORDINATION avec le round-robin de
+# config/comp/slam-odom.yaml, corrompant les réponses des deux côtés
+# (confirmé sur robot réel : fragments "tPwrPresent,1"/"tteryCycles,02ff"
+# dans les logs, des lignes tronquées d'une réponse GetWarranty/GetCharger
+# interrompue par une écriture concurrente). Ces 3 commandes sont
+# maintenant intégrées au round-robin unique dans slam-odom.yaml, seul
+# point d'écriture sur ce bus UART partagé.
 
 
 uart:
@@ -209,12 +210,32 @@ uart:
   baud_rate: 115200
   tx_pin: ${uart_tx}
   rx_pin: ${uart_rx}
-  rx_buffer_size: 2048
+  # 2048 (valeur du projet original) était trop petit pour GetLDSScan
+  # (~360 lignes, ~6-7Ko) - confirmé sur robot réel avec la version
+  # ligne-par-ligne ci-dessous (maintenant abandonnée) : débordement,
+  # blocs de lignes perdus/fusionnés. 8192 corrige ça indépendamment du
+  # choix de délimiteur.
+  rx_buffer_size: 8192
   debug:
     dummy_receiver: true
     direction: RX
     after:
       bytes: 0
+      # Retour au délimiteur \x1A du projet original (ESPHome attend
+      # nativement la réponse complète avant de déclencher cette lambda,
+      # au lieu de notre version ligne-par-ligne). Le projet original
+      # utilisait déjà \x1A avec succès pour tout SAUF GetLDSScan (qui
+      # faisait planter l'ESP) - on avait alors changé de délimiteur
+      # entièrement pour contourner ce crash, mais il est bien plus
+      # probable que la vraie cause était juste rx_buffer_size trop petit
+      # (2048, déjà corrigé ci-dessus indépendamment) plutôt que le
+      # délimiteur \x1A lui-même. Confirmé sur robot réel : le nettoyage
+      # natif (roues) ne fonctionne plus du tout avec notre version
+      # ligne-par-ligne, alors qu'il fonctionne normalement avec le
+      # firmware original (\x1A) - le traitement par ligne semble
+      # perturber une communication interne temps réel dont dépend la
+      # conduite active, invisible sur les échanges commande/réponse
+      # classiques qu'on a testés (Get/SetXXX marchent tous très bien).
       delimiter: "\x1A"
     sequence:
       - lambda: !lambda |-
@@ -239,6 +260,10 @@ uart:
           };
 
           // ---- SPLIT ON CRLF ----
+          // Comme le projet original : la réponse complète arrive d'un
+          // coup (ESPHome a déjà attendu le \x1A), on la découpe ici sur
+          // \r\n plutôt qu'une accumulation manuelle entre appels - plus
+          // simple, plus fidèle au format réel envoyé par le robot.
           std::vector<std::string> lines;
           size_t start = 0;
           size_t end = 0;
@@ -256,7 +281,14 @@ uart:
             if (!last.empty()) lines.push_back(last);
           }
 
+          // Débloque le round-robin (slam-odom.yaml) : avec \x1A comme
+          // délimiteur ESPHome, cette lambda ne se déclenche qu'une fois
+          // par réponse COMPLÈTE - donc dès qu'on est ici, la réponse
+          // précédente est forcément terminée.
+          id(g_awaiting_response) = false;
+
           if (lines.empty()) return;
+
 
           // ---- DETECT WHICH COMMAND WAS USED ----
           std::string command = lines[0];  // first line (GetErr, GetState, etc.)
@@ -333,6 +365,293 @@ uart:
               else if (key == "VExtV") id(chargerVExtV).publish_state(atof(value.c_str()));
               else if (key == "Charger_mAH") id(chargerCharger_mAH).publish_state(atof(value.c_str()));
               else if (key == "Discharge_mAH") id(chargerDischarge_mAH).publish_state(atof(value.c_str()));
+            }
+          }
+
+          // ---- SLAM: GetMotor -> publie l'odometrie (roues) en MQTT ----
+          // Format confirme sur ce robot (voir research/command-experiments.md) :
+          //   GetMotor
+          //   Parameter,Value
+          //   Brush_RPM,0
+          //   ...
+          //   LeftWheel_PositionInMM,-365
+          //   ...
+          //   RightWheel_PositionInMM,-365
+          //   ...
+          // Note : la commande reelle est bien "GetMotor" (singulier), pas
+          // "GetMotors" comme liste dans la doc officielle Neato.
+          
+
+            // On ne publie que si on a bien recupere les deux valeurs,
+            // sinon slam_bridge.py risque de recevoir un delta faux (une
+            // seule roue mise a jour par rapport au message precedent).
+            if (have_left && have_right) {
+              // Horloge relative (secondes depuis le boot de l'ESP) : le
+              // bridge SLAM ne calcule que des deltas de temps entre deux
+              // messages, donc pas besoin d'une horloge absolue (NTP/HA).
+              double ts = millis() / 1000.0;
+
+              char payload[128];
+              int len = snprintf(
+                  payload, sizeof(payload),
+                  "{\"left_mm\":%.2f,\"right_mm\":%.2f,\"timestamp\":%.3f}",
+                  left_mm, right_mm, ts
+              );
+
+              if (len > 0 && len < (int) sizeof(payload)) {
+                // "neato_mqtt" est l'id du composant mqtt: defini dans
+                // config/comp/slam-odom.yaml (a inclure dans local.yaml).
+                id(neato_mqtt).publish(
+                    "${mqtt_wheels_topic}",
+                    std::string(payload, len),
+                    0,     // QoS 0 : donnees frequentes, pas critique d'en perdre une
+                    false  // retain = false
+                );
+              }
+            }
+          }
+
+          // ---- SECURITE : GetDigitalSensors -> chocs + roue soulevee ----
+          // Format confirme sur ce robot (research/command-experiments.md) :
+          //   GetDigitalSensors
+          //   Digital Sensor Name, Value
+          //   SNSR_DC_JACK_IS_IN,0
+          //   SNSR_DUSTBIN_IS_IN,1
+          //   SNSR_LEFT_WHEEL_EXTENDED,0   <- roue soulevee = bord/vide en dessous
+          //   SNSR_RIGHT_WHEEL_EXTENDED,0
+          //   LSIDEBIT,0                    <- chocs (pare-chocs) : 1 = touche
+          //   LFRONTBIT,0
+          //   LLDSBIT,0
+          //   RSIDEBIT,0
+          //   RFRONTBIT,0
+          //   RLDSBIT,0
+          else if (command == "GetDigitalSensors") {
+            bool bump = false;
+            bool wheel_extended = false;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              size_t comma = line.find(',');
+              if (comma == std::string::npos) continue;
+
+              std::string key = line.substr(0, comma);
+              std::string value = line.substr(comma + 1);
+              trim(key);
+              trim(value);
+              bool is_set = (value == "1");
+
+              if (key == "SNSR_LEFT_WHEEL_EXTENDED" || key == "SNSR_RIGHT_WHEEL_EXTENDED") {
+                if (is_set) wheel_extended = true;
+              } else if (key == "LSIDEBIT" || key == "LFRONTBIT" ||
+                         key == "RSIDEBIT" || key == "RFRONTBIT") {
+                if (is_set) bump = true;
+              }
+              // LLDSBIT/RLDSBIT : chocs sur le mat LiDAR, pas geres ici pour
+              // l'instant (pas critique pour l'arret d'urgence roues/chute).
+            }
+
+            id(g_safety_bump) = bump;
+            id(g_safety_wheel_extended) = wheel_extended;
+
+            if (bump || wheel_extended) {
+              // g_safety_stop se verrouille TOUJOURS immédiatement, quel
+              // que soit l'état du bus - pas cher (juste un booléen),
+              // aucune écriture UART impliquée à ce stade.
+              id(g_safety_stop) = true;
+              // L'écriture immédiate du Disable, elle, ne se fait QUE si
+              // le bus est libre (aucune réponse en vol) - sans ça, on
+              // recréait exactement le genre de collision qu'on a
+              // corrigé ailleurs (écriture directe hors synchronisation,
+              // signalé lors d'un audit du 4 septembre). Si le bus est
+              // occupé, on laisse le round-robin s'en charger à son
+              // prochain passage sur SetMotor (action==2, qui vérifie
+              // déjà g_safety_stop) - légèrement moins immédiat, mais
+              // jamais de corruption.
+              if (!id(g_awaiting_response)) {
+                id(g_awaiting_response) = true;
+                id(g_awaiting_response_since_ms) = millis();
+                id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+              }
+            }
+          }
+
+          // ---- SECURITE : GetAnalogSensors -> detection de vide (chute) ----
+          // Format confirme sur ce robot (research/command-experiments.md) :
+          //   GetAnalogSensors
+          //   SensorName,Unit,Value
+          //   ...
+          //   DropSensorLeft,mm,19,
+          //   DropSensorRight,mm,19,
+          //
+          // SEUIL NON CALIBRE : la valeur "19" ci-dessus vient d'un robot
+          // pose sur un sol normal. Je n'ai aucune capture de la valeur
+          // lue au-dessus d'un vide (escalier). Le seuil ci-dessous est
+          // maintenant une valeur CALIBRABLE A CHAUD (id g_cal_drop_threshold_mm,
+          // definie dans slam-odom.yaml, persistee en flash) plutot qu'une
+          // constante figee - voir slam/calibrate.py pour la mesurer
+          // proprement (sol normal vs au-dessus du vide) sans avoir a
+          // reflasher a chaque essai.
+          else if (command == "GetAnalogSensors") {
+            bool cliff = false;
+            int drop_left_mm = -1;
+            int drop_right_mm = -1;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              // Format "Name,Unit,Value," (3 colonnes + virgule finale)
+              size_t c1 = line.find(',');
+              if (c1 == std::string::npos) continue;
+              size_t c2 = line.find(',', c1 + 1);
+              if (c2 == std::string::npos) continue;
+              size_t c3 = line.find(',', c2 + 1);
+
+              std::string key = line.substr(0, c1);
+              std::string value_str = (c3 == std::string::npos)
+                  ? line.substr(c2 + 1)
+                  : line.substr(c2 + 1, c3 - c2 - 1);
+              trim(key);
+              trim(value_str);
+
+              if (key == "DropSensorLeft" || key == "DropSensorRight") {
+                int value = atoi(value_str.c_str());
+                if (key == "DropSensorLeft") drop_left_mm = value;
+                else drop_right_mm = value;
+                if (value > id(g_cal_drop_threshold_mm)) cliff = true;
+              }
+            }
+
+            id(g_safety_cliff) = cliff;
+
+            if (cliff) {
+              id(g_safety_stop) = true;
+              if (!id(g_awaiting_response)) {
+                id(g_awaiting_response) = true;
+                id(g_awaiting_response_since_ms) = millis();
+                id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+              }
+            }
+
+            // Publication MQTT du statut de securite complet (3 flags +
+            // valeurs BRUTES des capteurs de vide, necessaires pour
+            // calibrer g_cal_drop_threshold_mm depuis slam/calibrate.py -
+            // sans elles, impossible de savoir quelle valeur mettre).
+            char safety_payload[220];
+            int slen = snprintf(
+                safety_payload, sizeof(safety_payload),
+                "{\"bump\":%s,\"cliff\":%s,\"wheel_extended\":%s,\"stop\":%s,"
+                "\"drop_left_mm\":%d,\"drop_right_mm\":%d,\"drop_threshold_mm\":%.1f,"
+                "\"timestamp\":%.3f}",
+                id(g_safety_bump) ? "true" : "false",
+                id(g_safety_cliff) ? "true" : "false",
+                id(g_safety_wheel_extended) ? "true" : "false",
+                id(g_safety_stop) ? "true" : "false",
+                drop_left_mm, drop_right_mm, id(g_cal_drop_threshold_mm),
+                millis() / 1000.0
+            );
+            if (slen > 0 && slen < (int) sizeof(safety_payload)) {
+              id(neato_mqtt).publish(
+                  "${mqtt_safety_topic}",
+                  std::string(safety_payload, slen),
+                  1,     // QoS 1 : c'est de la securite, on veut que ca arrive
+                  false
+              );
+            }
+          }
+
+          // ---- SLAM: GetLDSScan -> publie le scan LiDAR en MQTT (JSON) ----
+          // IMPORTANT - non verifie sur un vrai robot :
+          // Contrairement a GetMotor (capture reelle disponible dans
+          // research/command-experiments.md), je n'ai trouve aucune capture
+          // reelle de "GetLDSScan" dans ce repo. Le parsing ci-dessous
+          // suppose le format habituellement documente pour cette commande
+          // sur le port debug Neato (PAS le format binaire brut du capteur
+          // LDS lui-meme, qui necessiterait un second fil direct sur le
+          // module - confirme absent ici, un seul fil vers le port debug) :
+          //
+          //   GetLDSScan
+          //   AngleInDegrees,DistInMM,Intensity,ErrorCode
+          //   0,543,84,0
+          //   1,542,87,0
+          //   ...
+          //   359,540,90,0
+          //   ROTATION_SPEED,300
+          //
+          // A VALIDER : flashe, lance "GetLDSScan" en TestMode, et compare
+          // les logs uart_debug reels a ce format avant de faire confiance
+          // aux donnees publiees. Si l'ordre des colonnes differe, ajuste
+          // l'indice ci-dessous (angle_deg = colonne 0, dist_mm = colonne 1).
+          else if (command == "GetLDSScan") {
+            // 360 mesures max (une par degre). inf = pas de retour valide.
+            static float ranges_m[360];
+            static bool got_point[360];
+            for (int i = 0; i < 360; i++) { ranges_m[i] = INFINITY; got_point[i] = false; }
+
+            for (size_t i = 1; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              if (line.empty()) continue;
+              // On ignore la ligne d'entete (non numerique) et le footer
+              // ROTATION_SPEED (pas une mesure d'angle).
+              if (!std::isdigit(static_cast<unsigned char>(line[0]))) continue;
+
+              // Split manuel sur ','
+              size_t p1 = line.find(',');
+              if (p1 == std::string::npos) continue;
+              size_t p2 = line.find(',', p1 + 1);
+              std::string angle_str = line.substr(0, p1);
+              std::string dist_str = (p2 == std::string::npos)
+                  ? line.substr(p1 + 1)
+                  : line.substr(p1 + 1, p2 - p1 - 1);
+
+              int angle_deg = atoi(angle_str.c_str());
+              int dist_mm = atoi(dist_str.c_str());
+
+              if (angle_deg < 0 || angle_deg >= 360) continue;
+              if (dist_mm <= 0) continue;  // 0 = pas de retour valide
+
+              // Filtre de plausibilité physique : la portée réelle de ce
+              // capteur (LDS Neato) est de quelques mètres. Confirmé sur
+              // robot réel : des valeurs ~16.7-17.0m apparaissent groupées
+              // à des angles très différents du même scan (114-117, 128,
+              // 255-272) - une "vraie" distance identique dans 10
+              // directions différentes de la pièce est physiquement
+              // implausible. Très probablement une valeur-sentinelle du
+              // capteur pour "hors de portée", différente de 0, jamais
+              // filtrée jusqu'ici - donc publiée comme si c'était un vrai
+              // mur, de quoi corrompre gravement la carte SLAM avec des
+              // murs fantômes à 17m. Bornes alignées sur celles déjà
+              // utilisées côté affichage dans diagnose.py.
+              if (dist_mm < 100 || dist_mm > 8000) continue;
+
+              ranges_m[angle_deg] = dist_mm / 1000.0f;
+              got_point[angle_deg] = true;
+            }
+
+            // ---- Construction du JSON ----
+            // Taille max : "inf," ou "8.123," * 360 + accolades ~ 3.5KB,
+            // largement sous la limite MQTT par defaut (256KB).
+            static char json_buf[4096];
+            size_t pos = 0;
+            pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "{\"ranges\":[");
+            for (int i = 0; i < 360 && pos < sizeof(json_buf) - 16; i++) {
+              if (got_point[i]) {
+                pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "%.3f", ranges_m[i]);
+              } else {
+                pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "null");
+              }
+              if (i < 359) pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, ",");
+            }
+            pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
+                             "],\"angle_min\":0.0,\"angle_max\":6.2657,"
+                             "\"angle_increment\":0.017453,\"timestamp\":%.3f}",
+                             millis() / 1000.0);
+
+            if (pos > 0 && pos < sizeof(json_buf)) {
+              id(neato_mqtt).publish(
+                  "${mqtt_scan_topic}",
+                  std::string(json_buf, pos),
+                  0,
+                  false
+              );
             }
           }
 
