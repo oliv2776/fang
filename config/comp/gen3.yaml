@@ -194,14 +194,16 @@ globals:
     initial_value: ''
 
 
-interval:
-  - interval: ${infointerval}
-    then:
-      - uart.write: "GetErr \n"
-      - uart.write: "GetState \n"
-  - interval: ${chargerinterval}
-    then: 
-      - uart.write: "GetCharger \n"
+# ATTENTION : le bloc "interval:" original qui envoyait GetErr/GetState
+# (via infointerval) et GetCharger (via chargerinterval) indépendamment a
+# été retiré d'ici - il tournait EN PARALLÈLE et SANS COORDINATION avec
+# le round-robin de config/comp/slam-odom.yaml, provoquant des collisions
+# sur le fil UART partagé. Confirmé sur robot réel : "Timeout en attente
+# de reponse UART (6000ms)" à répétition dans les logs pendant que ce
+# bloc restait actif, alors que le round-robin attendait une réponse
+# corrompue/jamais arrivée par la faute de cette écriture concurrente.
+# GetErr/GetState/GetCharger sont maintenant intégrés au round-robin
+# unique dans slam-odom.yaml, seul point d'écriture sur ce bus partagé.
 
 
 uart:
