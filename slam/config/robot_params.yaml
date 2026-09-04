@@ -1,4 +1,4 @@
-robot_localization:
+ekf_filter_node:
   ros__parameters:
     frequency: 30.0
     odom_frame: odom
