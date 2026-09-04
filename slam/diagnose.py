@@ -181,7 +181,10 @@ class Diagnostics:
     def _check_safety(self, payload):
         try:
             data = json.loads(payload)
-            required = {'bump', 'cliff', 'wheel_extended', 'stop'}
+            # 'stop' n'est plus publié depuis le retrait de la sécurité
+            # auto-disable (g_safety_stop) - les flags bump/cliff/
+            # wheel_extended restent informatifs, non-actionnants.
+            required = {'bump', 'cliff', 'wheel_extended'}
             missing = required - set(data.keys())
         except json.JSONDecodeError as e:
             print(err(f"[{ts()}] /safety: JSON invalide ({e})"))
@@ -190,8 +193,9 @@ class Diagnostics:
             print(err(f"[{ts()}] /safety: champs manquants: {missing}"))
             return
 
-        if data['stop']:
-            print(err(f"[{ts()}] /safety: ARRÊT ACTIF  bump={data['bump']} "
+        any_flag = data['bump'] or data['cliff'] or data['wheel_extended']
+        if any_flag:
+            print(err(f"[{ts()}] /safety: FLAG ACTIF  bump={data['bump']} "
                        f"cliff={data['cliff']} wheel_extended={data['wheel_extended']}"))
         else:
             print(ok(f"[{ts()}] /safety OK") + f"  bump={data['bump']} cliff={data['cliff']} "
