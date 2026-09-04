@@ -193,12 +193,17 @@ text_sensor:
               return true;
             });
 
-  # ---- Commandes brosse/aspirateur + test + calibration ----
+  # ---- Commandes brosse/aspirateur + test + calibration + conduite ----
   # Payloads attendus (texte brut) :
   #   "clean_on" / "clean_off"
   #   "pause_polling" / "resume_polling"
   #   "raw:<commande>" -> envoie <commande> une seule fois
   #   "cal:drop_threshold:<mm>" / "cal:dist_scale:<f>" / "cal:wheel_base:<m>"
+  #   "drive:<SUFFIXE>" -> SetEvent UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_<SUFFIXE>
+  #     (conduite manuelle native, ex: "drive:FORWARD_DOWN", "drive:FORWARD_UP")
+  #   "drive_start" -> UIMGR_EVENT_SMARTAPP_START_MANUAL_CLEANING (à envoyer
+  #     une fois avant tout "drive:...", pour entrer en mode conduite)
+  #   "drive_stop" -> UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_BTN_TIMEOUT
   - platform: mqtt_subscribe
     id: clean_cmd_in
     topic: ${mqtt_clean_cmd_topic}
@@ -231,6 +236,19 @@ text_sensor:
               float v = atof(x.substr(16).c_str());
               id(g_cal_wheel_base_m) = v;
               ESP_LOGW("cal", "g_cal_wheel_base_m = %.4f m", v);
+            } else if (x == "drive_start") {
+              std::string cmd = "SetEvent event UIMGR_EVENT_SMARTAPP_START_MANUAL_CLEANING SKey " + id(robot_skey) + " \n";
+              id(g_pending_cmd) = cmd;
+              ESP_LOGW("drive", "Entree en mode conduite manuelle");
+            } else if (x == "drive_stop") {
+              std::string cmd = "SetEvent event UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_BTN_TIMEOUT SKey " + id(robot_skey) + " \n";
+              id(g_pending_cmd) = cmd;
+              ESP_LOGW("drive", "Arret conduite manuelle");
+            } else if (x.rfind("drive:", 0) == 0) {
+              std::string suffix = x.substr(6);
+              std::string cmd = "SetEvent event UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_" + suffix + " SKey " + id(robot_skey) + " \n";
+              id(g_pending_cmd) = cmd;
+              ESP_LOGW("drive", "Conduite: %s", suffix.c_str());
             }
 
 script:
