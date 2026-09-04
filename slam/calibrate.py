@@ -219,6 +219,15 @@ def calibrate_distance_scale(cal: Calibrator):
 
     cal.send_cmd("pause_polling")
     time.sleep(1)
+    # SetMotor est documenté "(TestMode Only)" - pause_polling coupe le
+    # round-robin, qui est la SEULE chose qui réaffirme TestMode on en
+    # temps normal. Sans ce renvoi explicite ici, TestMode a de bonnes
+    # chances d'avoir expiré au moment où SetMotor part, qui serait alors
+    # silencieusement ignoré par le robot (delta encodeur nul, aucune
+    # erreur visible) - confirmé exactement ce symptôme lors d'un premier
+    # essai.
+    cal.send_cmd("raw:TestMode on")
+    time.sleep(0.3)
 
     before = cal.sample_wheels()
     if not before:
@@ -298,6 +307,10 @@ def calibrate_wheel_base(cal: Calibrator):
 
     cal.send_cmd("pause_polling")
     time.sleep(1)
+    # Même raison qu'à l'étape 2 : pause_polling coupe le round-robin qui
+    # réaffirmait TestMode on, à réaffirmer explicitement ici.
+    cal.send_cmd("raw:TestMode on")
+    time.sleep(0.3)
 
     rot_mm = 150  # petite rotation, prudence
     cal.send_cmd(f"raw:SetMotor RWheelDist {rot_mm} LWheelDist -{rot_mm} Speed 20")
@@ -352,8 +365,8 @@ def main():
     parser.add_argument("--prefix", default=read_env_default("MQTT_PREFIX", "neato/robot"))
     parser.add_argument("--skip-wheel-base", action="store_true",
                          help="Ne propose même pas l'étape 3 (expérimentale)")
-    parser.add_argument("--username", default=read_env_default("MQTT_USERNAME", ""))
-    parser.add_argument("--password", default=read_env_default("MQTT_PASSWORD", ""))
+    parser.add_argument("-u", "--username", default=read_env_default("MQTT_USERNAME", ""))
+    parser.add_argument("-P", "--password", default=read_env_default("MQTT_PASSWORD", ""))
     args = parser.parse_args()
 
     cal = Calibrator(args.broker, args.port, args.prefix, args.username, args.password)
