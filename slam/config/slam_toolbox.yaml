@@ -29,7 +29,18 @@ slam_toolbox:
     scan_buffer_size: 20
     scan_buffer_maximum_scan_distance: 8.0
     link_match_minimum_response_fine: 0.1
-    link_scan_maximum_distance: 1.5
+    # 1.5m (valeur d'origine) était trop strict pour la cadence réelle du
+    # round-robin ESP32 (polling sur un seul fil UART partagé, GetLDSScan
+    # ~3.6-4s de réponse incompressible côté robot) - le robot parcourt
+    # souvent plus de 1.5m entre deux scans à vitesse de nettoyage
+    # normale, confirmé sur robot réel (carte fragmentée en îlots
+    # déconnectés malgré une odométrie qui progresse correctement et une
+    # fréquence de scan déjà maximisée côté round-robin). 5.0m laisse
+    # nettement plus de marge pour relier des scans espacés, au prix
+    # d'un risque de mauvais appariement un peu plus élevé si deux zones
+    # différentes se ressemblent visuellement - à resserrer plus tard si
+    # la carte devient rectangulairement dupliquée par endroits.
+    link_scan_maximum_distance: 5.0
 
      # --- Localisation ---
     localization: false
