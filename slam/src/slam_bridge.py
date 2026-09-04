@@ -80,7 +80,6 @@ from rclpy.executors import SingleThreadedExecutor
 from geometry_msgs.msg import Twist, Quaternion
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
-from tf2_ros import TransformBroadcaster, TransformStamped
 from std_msgs.msg import Bool
 
 try:
@@ -139,7 +138,6 @@ class SlamBridge(Node):
         # _on_nav2_cmd_vel ci-dessous. Publier les deux sur le même topic
         # ferait interférer manuel et autonome sans arbitrage.
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel_manual', 10)
-        self.tf_broadcaster = TransformBroadcaster(self)
 
         # /safety_stop : republie l'état de sécurité lu sur l'ESP32 (chocs,
         # roue soulevée, vide détecté) pour que coverage_planner.py (et
@@ -480,15 +478,16 @@ class SlamBridge(Node):
 
         self.odom_pub.publish(odom)
 
-        t = TransformStamped()
-        t.header.stamp = stamp
-        t.header.frame_id = 'odom'
-        t.child_frame_id = 'base_link'
-        t.transform.translation.x = x
-        t.transform.translation.y = y
-        t.transform.translation.z = 0.0
-        t.transform.rotation = odom.pose.pose.orientation
-        self.tf_broadcaster.sendTransform(t)
+        # PAS de self.tf_broadcaster.sendTransform() ici : ekf_node
+        # (robot_localization) publie DÉJÀ la transformée odom->base_link
+        # par défaut (publish_tf: true, jamais désactivé explicitement
+        # dans config/robot_params.yaml). Publier cette même transformée
+        # depuis les deux nœuds à la fois casse l'arbre TF - confirmé sur
+        # robot réel : "tf2_echo odom base_link" retournait "Tf has two or
+        # more unconnected trees", et slam_toolbox n'intégrait plus aucun
+        # nouveau scan dans /map (carte figée malgré un robot qui bouge
+        # réellement). slam_bridge ne doit publier QUE le message /odom
+        # (consommé en entrée par ekf_node) - jamais la TF elle-même.
 
     def _handle_cmd_vel(self, data: dict):
         twist = Twist()
