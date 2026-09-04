@@ -214,14 +214,16 @@ def calibrate_distance_scale(cal: Calibrator):
     print("\n" + "=" * 60)
     print("ÉTAPE 2 — Échelle distance SetMotor")
     print("=" * 60)
-    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~1000mm en ligne droite).")
-    print("300mm/vitesse 30 n'a produit AUCUN mouvement lors d'un premier essai -")
-    print("la seule combinaison confirmée fonctionner ailleurs est 3000mm/vitesse")
-    print("60 (research/command-experiments.md). Valeur intermédiaire ici en")
-    print("attendant de confirmer un seuil minimum fiable.")
-    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 1.5m")
-    print("devant lui (prévoir de la marge si l'échelle réelle diffère de")
-    print("l'hypothèse). Reste à portée de main.\n")
+    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~3000mm en ligne droite = 3m).")
+    print("300mm/vitesse 30 ET 1000mm/vitesse 50 n'ont produit AUCUN mouvement")
+    print("lors des essais précédents (commande acceptée par le robot, écho")
+    print("normal, mais delta encodeur nul les deux fois). On retente avec la")
+    print("SEULE combinaison confirmée avoir fonctionné ailleurs")
+    print("(research/command-experiments.md) - si celle-ci échoue aussi, le")
+    print("problème n'est probablement pas une question de magnitude.")
+    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 3.5m")
+    print("devant lui (vrai couloir ou grande pièce nécessaire cette fois).")
+    print("Reste à portée de main.\n")
 
     confirm = input("Robot prêt, sol dégagé confirmé ? (o/N) ")
     if confirm.lower() != 'o':
@@ -247,12 +249,13 @@ def calibrate_distance_scale(cal: Calibrator):
         return
     print(f"Avant : left={before['left_mm']}mm right={before['right_mm']}mm")
 
-    commanded_mm = 1000
-    speed = 50
+    commanded_mm = 3000
+    speed = 60
     print(f"\nEnvoi de SetMotor pour {commanded_mm}mm à vitesse {speed}...")
     cal.send_cmd(f"raw:SetMotor RWheelDist {commanded_mm} LWheelDist {commanded_mm} Speed {speed}")
     print("Observe le robot avancer. Attends qu'il s'arrête tout seul...")
-    time.sleep(8)  # marge large, pas de moyen fiable de savoir quand SetMotor a fini
+    time.sleep(60)  # 3000mm à vitesse 60 (probablement mm/s) -> jusqu'à
+                     # ~50s de trajet, marge large
 
     after = cal.sample_wheels()
     cal.send_cmd("resume_polling")
