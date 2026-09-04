@@ -212,18 +212,22 @@ def calibrate_drop_threshold(cal: Calibrator):
 
 def calibrate_distance_scale(cal: Calibrator):
     print("\n" + "=" * 60)
-    print("ÉTAPE 2 — Échelle distance SetMotor")
+    print("ÉTAPE 2 — Échelle distance SetMotor (renvoi répété)")
     print("=" * 60)
-    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~3000mm en ligne droite = 3m).")
-    print("300mm/vitesse 30 ET 1000mm/vitesse 50 n'ont produit AUCUN mouvement")
-    print("lors des essais précédents (commande acceptée par le robot, écho")
-    print("normal, mais delta encodeur nul les deux fois). On retente avec la")
-    print("SEULE combinaison confirmée avoir fonctionné ailleurs")
-    print("(research/command-experiments.md) - si celle-ci échoue aussi, le")
-    print("problème n'est probablement pas une question de magnitude.")
-    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 3.5m")
-    print("devant lui (vrai couloir ou grande pièce nécessaire cette fois).")
-    print("Reste à portée de main.\n")
+    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (jusqu'à ~2-3m selon la durée).")
+    print("Trois essais précédents (300mm/30, 1000mm/50, 3000mm/60 - la seule")
+    print("combinaison documentée comme fonctionnelle) ont tous produit un")
+    print("delta encodeur nul, malgré une commande acceptée sans erreur.")
+    print("Nouvelle hypothèse, tirée de research/command-experiments.md :")
+    print('  "stopping the motors can be done as stated with the disable')
+    print('  commands, but then you need to enable them again. A faster way')
+    print('  would be to just set the distance to 1mm."')
+    print("Ça suggère que SetMotor doit être RÉAFFIRMÉ EN CONTINU (comme un")
+    print("contrôle de vitesse), pas juste envoyé une fois. On teste ça : la")
+    print("même commande, renvoyée toutes les 300ms pendant 5 secondes.")
+    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 2m")
+    print("devant lui. Reste à portée de main, prêt à couper l'alimentation")
+    print("si besoin (pas de bouton d'arrêt logiciel testé comme fiable).\n")
 
     confirm = input("Robot prêt, sol dégagé confirmé ? (o/N) ")
     if confirm.lower() != 'o':
@@ -232,13 +236,6 @@ def calibrate_distance_scale(cal: Calibrator):
 
     cal.send_cmd("pause_polling")
     time.sleep(1)
-    # SetMotor est documenté "(TestMode Only)" - pause_polling coupe le
-    # round-robin, qui est la SEULE chose qui réaffirme TestMode on en
-    # temps normal. Sans ce renvoi explicite ici, TestMode a de bonnes
-    # chances d'avoir expiré au moment où SetMotor part, qui serait alors
-    # silencieusement ignoré par le robot (delta encodeur nul, aucune
-    # erreur visible) - confirmé exactement ce symptôme lors d'un premier
-    # essai.
     cal.send_cmd("raw:TestMode on")
     time.sleep(0.3)
 
@@ -251,11 +248,16 @@ def calibrate_distance_scale(cal: Calibrator):
 
     commanded_mm = 3000
     speed = 60
-    print(f"\nEnvoi de SetMotor pour {commanded_mm}mm à vitesse {speed}...")
-    cal.send_cmd(f"raw:SetMotor RWheelDist {commanded_mm} LWheelDist {commanded_mm} Speed {speed}")
-    print("Observe le robot avancer. Attends qu'il s'arrête tout seul...")
-    time.sleep(60)  # 3000mm à vitesse 60 (probablement mm/s) -> jusqu'à
-                     # ~50s de trajet, marge large
+    n_sends = 17  # ~5s à 300ms d'intervalle
+    print(f"\nRenvoi de SetMotor ({commanded_mm}mm, vitesse {speed}) {n_sends} fois, toutes les 300ms...")
+    print("Observe le robot - coupe-le manuellement si un mouvement incontrôlé démarre.")
+    for i in range(n_sends):
+        cal.send_cmd(f"raw:SetMotor RWheelDist {commanded_mm} LWheelDist {commanded_mm} Speed {speed}")
+        time.sleep(0.3)
+
+    print("Fin des renvois - arrêt explicite, puis pause avant lecture finale...")
+    cal.send_cmd("raw:SetMotor LWheelDisable RWheelDisable")
+    time.sleep(2)
 
     after = cal.sample_wheels()
     cal.send_cmd("resume_polling")
@@ -263,6 +265,7 @@ def calibrate_distance_scale(cal: Calibrator):
         print(err("Pas de lecture GetMotor finale, abandon."))
         return
     print(f"Après : left={after['left_mm']}mm right={after['right_mm']}mm")
+
 
     delta_left = after['left_mm'] - before['left_mm']
     delta_right = after['right_mm'] - before['right_mm']
