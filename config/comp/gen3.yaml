@@ -278,14 +278,6 @@ uart:
           std::string chunk(bytes.begin(), bytes.end());
 
 
-          // Log explicite de la ligne brute reçue, garanti visible (à la
-          // différence de UARTDebug::log_string ci-dessus qui ne semble
-          // rien afficher avec dummy_receiver: true - cause exacte non
-          // identifiée, on contourne plutôt que de continuer à chercher).
-          // Retire cette ligne une fois GetLDSScan validé, elle rend les
-          // logs très verbeux en continu.
-          ESP_LOGW("uart_raw", "chunk brut: [%s]", chunk.c_str());
-
           // Un \x1A en tete de ce chunk = fin de la reponse precedente.
           // On finalise cette reponse-la AVANT de traiter le reste du
           // chunk courant (qui, lui, appartient a la reponse suivante).
@@ -646,6 +638,20 @@ uart:
 
               if (angle_deg < 0 || angle_deg >= 360) continue;
               if (dist_mm <= 0) continue;  // 0 = pas de retour valide
+
+              // Filtre de plausibilité physique : la portée réelle de ce
+              // capteur (LDS Neato) est de quelques mètres. Confirmé sur
+              // robot réel : des valeurs ~16.7-17.0m apparaissent groupées
+              // à des angles très différents du même scan (114-117, 128,
+              // 255-272) - une "vraie" distance identique dans 10
+              // directions différentes de la pièce est physiquement
+              // implausible. Très probablement une valeur-sentinelle du
+              // capteur pour "hors de portée", différente de 0, jamais
+              // filtrée jusqu'ici - donc publiée comme si c'était un vrai
+              // mur, de quoi corrompre gravement la carte SLAM avec des
+              // murs fantômes à 17m. Bornes alignées sur celles déjà
+              // utilisées côté affichage dans diagnose.py.
+              if (dist_mm < 100 || dist_mm > 8000) continue;
 
               ranges_m[angle_deg] = dist_mm / 1000.0f;
               got_point[angle_deg] = true;
