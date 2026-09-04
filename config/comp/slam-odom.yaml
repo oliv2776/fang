@@ -391,3 +391,4 @@ interval:
             id(g_pub_scan_pending) = false;
             id(neato_mqtt).publish("${mqtt_scan_topic}", id(g_pub_scan_payload), 0, false);
           }
+          
