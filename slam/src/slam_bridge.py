@@ -467,12 +467,12 @@ class SlamBridge(Node):
         odom.pose.pose.position.z = 0.0
         odom.pose.pose.orientation = self._euler_to_quat(theta)
         odom.pose.covariance = [
-            0.001, 0, 0, 0, 0, 0,
-            0, 0.001, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0.001, 0, 0,
-            0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0,
+            0.001, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.001, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.001, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ]
 
         odom.twist.twist.linear.x = lin_vel
