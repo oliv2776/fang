@@ -262,6 +262,18 @@ uart:
             if (!last.empty()) lines.push_back(last);
           }
 
+          // Débloque le round-robin (slam-odom.yaml) : avec \x1A comme
+          // délimiteur ESPHome, cette lambda ne se déclenche qu'une fois
+          // par réponse COMPLÈTE - donc dès qu'on est ici, la réponse
+          // précédente est forcément terminée. CETTE LIGNE AVAIT DISPARU
+          // lors de la reconstruction complète du fichier à partir de
+          // l'original (qui n'a pas cette variable, n'ayant pas de
+          // round-robin à coordonner) - son absence forçait TOUTES les
+          // commandes à attendre le timeout de 6s avant de progresser,
+          // confirmé sur robot réel (timeouts systématiques sur chaque
+          // commande, quel que soit l'intervalle de poll testé).
+          id(g_awaiting_response) = false;
+
           if (lines.empty()) return;
 
           // ---- DETECT WHICH COMMAND WAS USED ----
