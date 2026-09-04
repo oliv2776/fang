@@ -278,6 +278,15 @@ uart:
           std::string chunk(bytes.begin(), bytes.end());
 
 
+          // Log explicite temporaire : on n'a jamais regardé la vraie
+          // réponse brute du robot à TestMode/SetMotor - seulement à
+          // GetLDSScan jusqu'ici. SetMotor ne produit aucun mouvement
+          // malgré TestMode on envoyé juste avant (confirmé à deux
+          // magnitudes différentes, 300mm et 1000mm) - il faut voir si le
+          // robot répond par un echo normal ou un message d'erreur qu'on
+          // n'a jamais affiché.
+          ESP_LOGW("uart_raw", "chunk brut: [%s]", chunk.c_str());
+
           // Un \x1A en tete de ce chunk = fin de la reponse precedente.
           // On finalise cette reponse-la AVANT de traiter le reste du
           // chunk courant (qui, lui, appartient a la reponse suivante).
