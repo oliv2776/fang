@@ -416,10 +416,22 @@ class SlamBridge(Node):
             self._prev_odom_ts = ts
 
             # Filet de sécurité : un saut énorme (reset compteur ESP,
-            # overflow, glitch) ne doit pas téléporter la pose.
-            if abs(delta_left_m) > 1.0 or abs(delta_right_m) > 1.0:
+            # overflow, glitch) ne doit pas téléporter la pose. Seuil
+            # PROPORTIONNEL au temps écoulé (dt) plutôt que fixe : avec la
+            # cadence actuelle du round-robin ESP32 (~10-13s entre deux
+            # lectures GetMotor), un robot en nettoyage réel peut
+            # légitimement parcourir plus d'un mètre sur cet intervalle -
+            # confirmé sur robot réel, un seuil fixe de 1m rejetait de
+            # vrais mouvements dès que la cadence a été accélérée,
+            # bloquant toute mise à jour de /odom (et donc de la carte)
+            # dès qu'un nettoyage démarrait réellement. 0.5 m/s est une
+            # marge large au-dessus de la vitesse de nettoyage réelle
+            # d'un Neato (~0.2-0.35 m/s) ; le plancher de 0.3m couvre les
+            # intervalles très courts sans devenir trop permissif.
+            max_delta_m = max(0.5 * dt, 0.3)
+            if abs(delta_left_m) > max_delta_m or abs(delta_right_m) > max_delta_m:
                 self.get_logger().warn(
-                    "Delta roue aberrant (>1m entre deux messages), "
+                    f"Delta roue aberrant (>{max_delta_m:.2f}m sur {dt:.1f}s), "
                     "ignoré (reset de compteur côté robot ?)"
                 )
                 return
