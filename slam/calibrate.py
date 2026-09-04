@@ -212,40 +212,40 @@ def calibrate_drop_threshold(cal: Calibrator):
 
 def calibrate_distance_scale(cal: Calibrator):
     print("\n" + "=" * 60)
-    print("ÉTAPE 2 — Échelle distance SetMotor")
+    print("ÉTAPE 2 — Échelle distance (via nettoyage natif)")
     print("=" * 60)
-    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~1m en ligne droite).")
-    print("Les échecs précédents de SetMotor dataient d'avant qu'on trouve les")
-    print("vrais bugs bloquants (TestMode réaffirmé en continu, synchronisation")
-    print("UART manquante) - on retente avec un envoi simple, unique, main-")
-    print("tenant que l'architecture est fiable et rapide.")
-    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 1.5m")
-    print("devant lui. Reste à portée de main.\n")
+    print("⚠️ Cette étape FAIT BOUGER LE ROBOT.")
+    print("SetMotor nécessite TestMode pour fonctionner - volontairement écarté")
+    print("de ce script (choix explicite : TestMode a causé trop de problèmes")
+    print("de blocage par le passé). On calibre à la place à partir d'un vrai")
+    print("nettoyage natif (Clean Spot), confirmé fonctionner sans TestMode.")
+    print("Le trajet ne sera PAS une ligne droite parfaite (c'est un vrai")
+    print("mouvement de nettoyage) - on mesure la distance à vol d'oiseau")
+    print("entre le point de départ et le point d'arrivée, pas la trajectoire")
+    print("suivie. Moins précis qu'une ligne droite contrôlée, mais fiable.")
+    print("Marque bien la position de départ du robot au sol (repère, ruban")
+    print("adhésif...) avant de continuer.\n")
 
-    confirm = input("Robot prêt, sol dégagé confirmé ? (o/N) ")
+    confirm = input("Robot prêt, position de départ marquée ? (o/N) ")
     if confirm.lower() != 'o':
         print("Annulé.")
         return
 
-    cal.send_cmd("pause_polling")
-    time.sleep(1)
-
     before = cal.sample_wheels()
     if not before:
         print(err("Pas de lecture GetMotor initiale, abandon."))
-        cal.send_cmd("resume_polling")
         return
     print(f"Avant : left={before['left_mm']}mm right={before['right_mm']}mm")
 
-    commanded_mm = 1000
-    speed = 50
-    print(f"\nEnvoi de SetMotor ({commanded_mm}mm, vitesse {speed})...")
-    print("Observe le robot avancer. Attends qu'il s'arrête tout seul...")
-    cal.send_cmd(f"raw:SetMotor RWheelDist {commanded_mm} LWheelDist {commanded_mm} Speed {speed}")
-    time.sleep(8)
+    duration_s = 30
+    print(f"\nDéclenchement d'un nettoyage Clean Spot (zone 1m x 1m), "
+          f"{duration_s}s...")
+    cal.send_cmd("raw:Clean Spot Width 100 Height 100")
+    print("Observe le robot se déplacer. Ne le touche pas pendant ce temps.")
+    time.sleep(duration_s)
 
     after = cal.sample_wheels()
-    cal.send_cmd("resume_polling")
+    cal.send_cmd("raw:Clean Stop")
     if not after:
         print(err("Pas de lecture GetMotor finale, abandon."))
         return
@@ -255,35 +255,47 @@ def calibrate_distance_scale(cal: Calibrator):
     delta_left = after['left_mm'] - before['left_mm']
     delta_right = after['right_mm'] - before['right_mm']
     encoder_avg = (abs(delta_left) + abs(delta_right)) / 2
-    print(f"\nDelta encodeur : left={delta_left:+.1f}mm right={delta_right:+.1f}mm "
-          f"(moyenne={encoder_avg:.1f}mm, commandé={commanded_mm}mm)")
+    print(f"\nDistance encodeur cumulée : left={delta_left:+.1f}mm "
+          f"right={delta_right:+.1f}mm (moyenne={encoder_avg:.1f}mm)")
 
-    if encoder_avg < 5:
+    if encoder_avg < 50:
         print(warn(
-            "Delta quasi nul (<5mm) - si le robot n'a vraiment pas bougé,"
-            " ce n'est probablement plus la peine d'insister avec SetMotor"
-            " isolé : la calibration peut aussi se faire en mesurant une"
-            " distance connue pendant un nettoyage natif (Clean House/Spot),"
-            " qui lui est confirmé fonctionnel."
+            "Distance cumulée très faible (<50mm) - le robot a peut-être à"
+            " peine bougé pendant cette fenêtre, ou le cycle de nettoyage a"
+            " démarré par une phase quasi-stationnaire. Relance l'étape si"
+            " besoin, ou laisse tourner plus longtemps."
         ))
+        return
 
     measured = input(
-        "\nMesure maintenant la distance RÉELLEMENT parcourue au sol (mètre "
-        "ruban, en mm), ou Entrée pour utiliser uniquement la valeur "
-        "encodeur ci-dessus : "
+        "\nMesure maintenant la distance À VOL D'OISEAU entre le point de "
+        "départ marqué et la position actuelle du robot (mètre ruban, en "
+        "mm) : "
     ).strip()
 
-    if measured:
-        try:
-            physical_mm = float(measured)
-            scale = physical_mm / commanded_mm
-            print(f"Échelle physique (mesure au sol / commandé) : {scale:.4f}")
-        except ValueError:
-            print(warn("Valeur non numérique, on retombe sur l'encodeur."))
-            scale = encoder_avg / commanded_mm if commanded_mm else 1.0
-    else:
-        scale = encoder_avg / commanded_mm if commanded_mm else 1.0
-        print(f"Échelle encodeur (delta encodeur / commandé) : {scale:.4f}")
+    if not measured:
+        print("Rien mesuré, abandon (impossible de calculer une échelle "
+              "sans référence physique pour cette méthode).")
+        return
+
+    try:
+        physical_mm = float(measured)
+    except ValueError:
+        print(err("Valeur non numérique, abandon."))
+        return
+
+    if physical_mm <= 0:
+        print(err("Distance mesurée nulle ou négative, abandon."))
+        return
+
+    scale = physical_mm / encoder_avg
+    print(f"Échelle (mesure au sol / distance encodeur cumulée) : {scale:.4f}")
+    print(warn(
+        "Rappel : cette échelle est approximative (trajet non rectiligne, "
+        "distance à vol d'oiseau ≠ distance réellement parcourue) - "
+        "suffisant pour un premier réglage, mais moins précis qu'une vraie "
+        "ligne droite contrôlée."
+    ))
 
     if scale <= 0 or scale > 3.0:
         print(err(f"Valeur d'échelle suspecte ({scale:.4f}), hors de [0, 3] - abandon, rien envoyé."))
@@ -295,6 +307,7 @@ def calibrate_distance_scale(cal: Calibrator):
         print(ok(f"Envoyé : cal:dist_scale:{scale:.4f}"))
     else:
         print("Annulé, échelle non modifiée.")
+
 
 
 def calibrate_wheel_base(cal: Calibrator):
