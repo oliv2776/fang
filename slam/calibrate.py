@@ -212,22 +212,15 @@ def calibrate_drop_threshold(cal: Calibrator):
 
 def calibrate_distance_scale(cal: Calibrator):
     print("\n" + "=" * 60)
-    print("ÉTAPE 2 — Échelle distance SetMotor (renvoi répété)")
+    print("ÉTAPE 2 — Échelle distance SetMotor")
     print("=" * 60)
-    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (jusqu'à ~2-3m selon la durée).")
-    print("Trois essais précédents (300mm/30, 1000mm/50, 3000mm/60 - la seule")
-    print("combinaison documentée comme fonctionnelle) ont tous produit un")
-    print("delta encodeur nul, malgré une commande acceptée sans erreur.")
-    print("Nouvelle hypothèse, tirée de research/command-experiments.md :")
-    print('  "stopping the motors can be done as stated with the disable')
-    print('  commands, but then you need to enable them again. A faster way')
-    print('  would be to just set the distance to 1mm."')
-    print("Ça suggère que SetMotor doit être RÉAFFIRMÉ EN CONTINU (comme un")
-    print("contrôle de vitesse), pas juste envoyé une fois. On teste ça : la")
-    print("même commande, renvoyée toutes les 300ms pendant 5 secondes.")
-    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 2m")
-    print("devant lui. Reste à portée de main, prêt à couper l'alimentation")
-    print("si besoin (pas de bouton d'arrêt logiciel testé comme fiable).\n")
+    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~1m en ligne droite).")
+    print("Les échecs précédents de SetMotor dataient d'avant qu'on trouve les")
+    print("vrais bugs bloquants (TestMode réaffirmé en continu, synchronisation")
+    print("UART manquante) - on retente avec un envoi simple, unique, main-")
+    print("tenant que l'architecture est fiable et rapide.")
+    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 1.5m")
+    print("devant lui. Reste à portée de main.\n")
 
     confirm = input("Robot prêt, sol dégagé confirmé ? (o/N) ")
     if confirm.lower() != 'o':
@@ -246,20 +239,15 @@ def calibrate_distance_scale(cal: Calibrator):
         return
     print(f"Avant : left={before['left_mm']}mm right={before['right_mm']}mm")
 
-    commanded_mm = 3000
-    speed = 60
-    n_sends = 17  # ~5s à 300ms d'intervalle
-    print(f"\nRenvoi de SetMotor ({commanded_mm}mm, vitesse {speed}) {n_sends} fois, toutes les 300ms...")
-    print("Observe le robot - coupe-le manuellement si un mouvement incontrôlé démarre.")
-    for i in range(n_sends):
-        cal.send_cmd(f"raw:SetMotor RWheelDist {commanded_mm} LWheelDist {commanded_mm} Speed {speed}")
-        time.sleep(0.3)
-
-    print("Fin des renvois - arrêt explicite, puis pause avant lecture finale...")
-    cal.send_cmd("raw:SetMotor LWheelDisable RWheelDisable")
-    time.sleep(2)
+    commanded_mm = 1000
+    speed = 50
+    print(f"\nEnvoi de SetMotor ({commanded_mm}mm, vitesse {speed})...")
+    print("Observe le robot avancer. Attends qu'il s'arrête tout seul...")
+    cal.send_cmd(f"raw:SetMotor RWheelDist {commanded_mm} LWheelDist {commanded_mm} Speed {speed}")
+    time.sleep(8)
 
     after = cal.sample_wheels()
+    cal.send_cmd("raw:TestMode off")
     cal.send_cmd("resume_polling")
     if not after:
         print(err("Pas de lecture GetMotor finale, abandon."))
@@ -272,6 +260,15 @@ def calibrate_distance_scale(cal: Calibrator):
     encoder_avg = (abs(delta_left) + abs(delta_right)) / 2
     print(f"\nDelta encodeur : left={delta_left:+.1f}mm right={delta_right:+.1f}mm "
           f"(moyenne={encoder_avg:.1f}mm, commandé={commanded_mm}mm)")
+
+    if encoder_avg < 5:
+        print(warn(
+            "Delta quasi nul (<5mm) - si le robot n'a vraiment pas bougé,"
+            " ce n'est probablement plus la peine d'insister avec SetMotor"
+            " isolé : la calibration peut aussi se faire en mesurant une"
+            " distance connue pendant un nettoyage natif (Clean House/Spot),"
+            " qui lui est confirmé fonctionnel."
+        ))
 
     measured = input(
         "\nMesure maintenant la distance RÉELLEMENT parcourue au sol (mètre "
