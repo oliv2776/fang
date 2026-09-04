@@ -229,8 +229,6 @@ def calibrate_distance_scale(cal: Calibrator):
 
     cal.send_cmd("pause_polling")
     time.sleep(1)
-    cal.send_cmd("raw:TestMode on")
-    time.sleep(0.3)
 
     before = cal.sample_wheels()
     if not before:
@@ -247,7 +245,6 @@ def calibrate_distance_scale(cal: Calibrator):
     time.sleep(8)
 
     after = cal.sample_wheels()
-    cal.send_cmd("raw:TestMode off")
     cal.send_cmd("resume_polling")
     if not after:
         print(err("Pas de lecture GetMotor finale, abandon."))
@@ -321,10 +318,6 @@ def calibrate_wheel_base(cal: Calibrator):
 
     cal.send_cmd("pause_polling")
     time.sleep(1)
-    # Même raison qu'à l'étape 2 : pause_polling coupe le round-robin qui
-    # réaffirmait TestMode on, à réaffirmer explicitement ici.
-    cal.send_cmd("raw:TestMode on")
-    time.sleep(0.3)
 
     rot_mm = 150  # petite rotation, prudence
     cal.send_cmd(f"raw:SetMotor RWheelDist {rot_mm} LWheelDist -{rot_mm} Speed 20")
@@ -391,8 +384,6 @@ def test_negative_distance(cal: Calibrator):
 
     cal.send_cmd("pause_polling")
     time.sleep(1)
-    cal.send_cmd("raw:TestMode on")
-    time.sleep(0.3)
 
     before = cal.sample_wheels()
     if not before:
@@ -410,7 +401,6 @@ def test_negative_distance(cal: Calibrator):
 
     after = cal.sample_wheels()
     cal.send_cmd("raw:SetMotor LWheelDisable RWheelDisable")
-    cal.send_cmd("raw:TestMode off")
     cal.send_cmd("resume_polling")
     if not after:
         print(err("Pas de lecture GetMotor finale, abandon."))
