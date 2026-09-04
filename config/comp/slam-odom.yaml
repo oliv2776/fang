@@ -278,8 +278,20 @@ script:
           // vraie solution serait de ralentir la vitesse de déplacement
           // du robot pendant la cartographie, pas de pousser davantage
           // ce round-robin.
-          static const int SEQ[15] = {
-            4, 3, 4, 3, 4, 0, 4, 3, 4, 3, 4, 1, 4, 3, 2
+          // GetErr/GetState/GetCharger (actions 5,6,7) réintégrés ici -
+          // tournaient avant sur leur propre "interval:" indépendant dans
+          // gen3.yaml (bloc original), en collision confirmée avec ce
+          // round-robin sur robot réel ("Timeout en attente de reponse
+          // UART" à répétition). Fréquence volontairement plus faible
+          // qu'avant (~2s à l'origine) : plus aucune action automatique
+          // n'en dépend, juste des capteurs texte affichés en HA.
+          // 0=GetDigitalSensors, 1=GetAnalogSensors, 2=SetMotor,
+          // 3=GetMotor, 4=GetLDSScan, 5=GetErr, 6=GetState, 7=GetCharger
+          static const int SEQ[26] = {
+            4, 3, 4, 3, 4, 5, 6,
+            4, 3, 4, 3, 4, 0,
+            4, 3, 4, 3, 4, 1,
+            4, 3, 4, 3, 4, 7, 2
           };
 
           if (id(g_slam_poll_paused)) {
@@ -302,7 +314,7 @@ script:
           }
 
           int step = id(g_slam_poll_step);
-          id(g_slam_poll_step) = (step + 1) % 15;
+          id(g_slam_poll_step) = (step + 1) % 26;
           int action = SEQ[step];
 
           if (!id(g_pending_cmd).empty() && action != 0 && action != 1) {
@@ -335,6 +347,24 @@ script:
             id(g_awaiting_response) = true;
             id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetMotor \n");
+            return;
+          }
+          if (action == 5) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
+            id(uart_bus).write_str("GetErr \n");
+            return;
+          }
+          if (action == 6) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
+            id(uart_bus).write_str("GetState \n");
+            return;
+          }
+          if (action == 7) {
+            id(g_awaiting_response) = true;
+            id(g_awaiting_response_since_ms) = millis();
+            id(uart_bus).write_str("GetCharger \n");
             return;
           }
 
