@@ -380,7 +380,30 @@ uart:
           //   ...
           // Note : la commande reelle est bien "GetMotor" (singulier), pas
           // "GetMotors" comme liste dans la doc officielle Neato.
-          
+          else if (command == "GetMotor") {
+            bool have_left = false, have_right = false;
+            double left_mm = 0.0, right_mm = 0.0;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+
+              size_t comma = line.find(',');
+              if (comma == std::string::npos) continue;
+
+              std::string key = line.substr(0, comma);
+              std::string value = line.substr(comma + 1);
+
+              trim(key);
+              trim(value);
+
+              if (key == "LeftWheel_PositionInMM") {
+                left_mm = atof(value.c_str());
+                have_left = true;
+              } else if (key == "RightWheel_PositionInMM") {
+                right_mm = atof(value.c_str());
+                have_right = true;
+              }
+            }
 
             // On ne publie que si on a bien recupere les deux valeurs,
             // sinon slam_bridge.py risque de recevoir un delta faux (une
