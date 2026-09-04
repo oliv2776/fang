@@ -44,7 +44,17 @@ substitutions:
   # un cycle de 15 pas, ça peut représenter plusieurs secondes de pur
   # temps d'attente, indépendant de la vitesse réelle du robot. 50ms
   # réduit ce temps mort d'un facteur 10 sans rien changer d'autre.
-  slam_poll_interval: 50ms
+  # 50ms a provoqué une RÉGRESSION SÉVÈRE confirmée sur robot réel :
+  # timeouts systématiques à 6s sur absolument toutes les commandes
+  # (même GetDigitalSensors, normalement ~0.5s de réponse). Hypothèse la
+  # plus probable : deux intervals à 50ms tournant en parallèle (celui-ci
+  # + le vidage des publications MQTT différées, plus bas dans ce
+  # fichier) ont surchargé l'ESP32 au point de dégrader la réception UART
+  # elle-même, pas juste la réactivité du round-robin. Revenu à 200ms -
+  # compromis entre le 500ms d'origine (trop de temps mort par pas) et le
+  # 50ms qui casse tout - à valider sur robot réel avant d'aller plus loin
+  # dans cette direction.
+  slam_poll_interval: 200ms
 
   # Si aucun cmd_vel_out frais depuis plus longtemps que ça, arrêt auto.
   cmd_vel_stale_timeout: "2500"
@@ -413,7 +423,11 @@ interval:
       - script.execute: slam_poll_cycle
 
   # Vidage des publications MQTT différées, indépendant du round-robin.
-  - interval: 50ms
+  # Remonté à 150ms (au lieu de 50ms) par précaution après la régression
+  # observée avec deux intervals à 50ms tournant simultanément - pas la
+  # cause confirmée à 100%, mais autant réduire la pression cumulée sur
+  # l'ESP32 tant que ce n'est pas isolé précisément.
+  - interval: 150ms
     then:
       - lambda: !lambda |-
           if (id(g_pub_wheels_pending)) {
