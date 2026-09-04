@@ -224,24 +224,39 @@ uart:
   baud_rate: 115200
   tx_pin: ${uart_tx}
   rx_pin: ${uart_rx}
-  rx_buffer_size: 8192  # 2048 était trop petit pour GetLDSScan (~360 lignes,
-                          # ~6-7Ko) : confirmé sur robot réel, des blocs entiers
-                          # de lignes disparaissaient ou fusionnaient (débordement
-                          # du buffer de réception, pas un bug de parsing).
+  # 2048 (valeur du projet original) était trop petit pour GetLDSScan
+  # (~360 lignes, ~6-7Ko) - confirmé sur robot réel avec la version
+  # ligne-par-ligne ci-dessous (maintenant abandonnée) : débordement,
+  # blocs de lignes perdus/fusionnés. 8192 corrige ça indépendamment du
+  # choix de délimiteur.
+  rx_buffer_size: 8192
   debug:
     dummy_receiver: true
     direction: RX
     after:
       bytes: 0
-      # Ligne par ligne (au lieu d'attendre le \x1A de fin de reponse en une
-      # seule fois) : evite le crash documente dans
-      # research/command-experiments.md quand la reponse est volumineuse
-      # (GetLDSScan ~360 lignes). Voir le commentaire au debut de la lambda
-      # ci-dessous pour l'accumulation manuelle des lignes d'une meme reponse.
-      delimiter: "\n"
+      # Retour au délimiteur \x1A du projet original (ESPHome attend
+      # nativement la réponse complète avant de déclencher cette lambda,
+      # au lieu de notre version ligne-par-ligne). Le projet original
+      # utilisait déjà \x1A avec succès pour tout SAUF GetLDSScan (qui
+      # faisait planter l'ESP) - on avait alors changé de délimiteur
+      # entièrement pour contourner ce crash, mais il est bien plus
+      # probable que la vraie cause était juste rx_buffer_size trop petit
+      # (2048, déjà corrigé ci-dessus indépendamment) plutôt que le
+      # délimiteur \x1A lui-même. Confirmé sur robot réel : le nettoyage
+      # natif (roues) ne fonctionne plus du tout avec notre version
+      # ligne-par-ligne, alors qu'il fonctionne normalement avec le
+      # firmware original (\x1A) - le traitement par ligne semble
+      # perturber une communication interne temps réel dont dépend la
+      # conduite active, invisible sur les échanges commande/réponse
+      # classiques qu'on a testés (Get/SetXXX marchent tous très bien).
+      delimiter: "\x1A"
     sequence:
       - lambda: !lambda |-
           UARTDebug::log_string(direction, bytes);
+
+          // convert bytes -> std::string
+          std::string str(bytes.begin(), bytes.end());
 
           // ---- TRIM FUNCTION ----
           auto trim = [](std::string &s) {
@@ -258,73 +273,36 @@ uart:
               return static_cast<uint32_t>(strtoul(hex.c_str(), nullptr, 16));
           };
 
-          // ---- ACCUMULATION LIGNE PAR LIGNE D'UNE REPONSE COMPLETE ----
-          // Le trigger se declenche maintenant a chaque "\n" recu (voir
-          // "after:" ci-dessus) au lieu d'attendre le \x1A de fin de
-          // reponse d'un coup : necessaire pour GetLDSScan (~360 lignes)
-          // qui plantait l'ESP en mode "buffer complet" (cf
-          // research/command-experiments.md). On reconstitue donc la
-          // reponse complete nous-memes dans un buffer statique entre
-          // deux appels de cette lambda.
-          //
-          // Le robot termine une reponse complete par un octet \x1A
-          // colle a la fin de la derniere ligne de contenu (pas de \r\n
-          // avant), donc il n'arrive PAS via son propre trigger "\n" :
-          // il est livre au debut du PROCHAIN chunk de ligne recu (celui
-          // de la prochaine commande). On le detecte donc en tete de
-          // chunk, pas en fin.
-          static std::vector<std::string> line_buf;
+          // ---- SPLIT ON CRLF ----
+          // Comme le projet original : la réponse complète arrive d'un
+          // coup (ESPHome a déjà attendu le \x1A), on la découpe ici sur
+          // \r\n plutôt qu'une accumulation manuelle entre appels - plus
+          // simple, plus fidèle au format réel envoyé par le robot.
+          std::vector<std::string> lines;
+          size_t start = 0;
+          size_t end = 0;
 
-          std::string chunk(bytes.begin(), bytes.end());
-
-
-          // Log explicite temporaire : on n'a jamais regardé la vraie
-          // réponse brute du robot à TestMode/SetMotor - seulement à
-          // GetLDSScan jusqu'ici. SetMotor ne produit aucun mouvement
-          // malgré TestMode on envoyé juste avant (confirmé à deux
-          // magnitudes différentes, 300mm et 1000mm) - il faut voir si le
-          // robot répond par un echo normal ou un message d'erreur qu'on
-          // n'a jamais affiché.
-          ESP_LOGW("uart_raw", "chunk brut: [%s]", chunk.c_str());
-
-          // Un \x1A en tete de ce chunk = fin de la reponse precedente.
-          // On finalise cette reponse-la AVANT de traiter le reste du
-          // chunk courant (qui, lui, appartient a la reponse suivante).
-          size_t ctrl_z_pos = chunk.find('\x1A');
-          std::string remainder;
-          bool have_terminator = (ctrl_z_pos != std::string::npos);
-          if (have_terminator) {
-            remainder = chunk.substr(ctrl_z_pos + 1);
-            chunk = chunk.substr(0, ctrl_z_pos);
+          while ((end = str.find("\r\n", start)) != std::string::npos) {
+            std::string line = str.substr(start, end - start);
+            trim(line);
+            if (!line.empty()) lines.push_back(line);
+            start = end + 2;
           }
 
-          trim(chunk);
-          if (!chunk.empty()) line_buf.push_back(chunk);
-
-          if (!have_terminator) {
-            // Reponse pas encore terminee, on attend la suite.
-            return;
+          if (start < str.size()) {
+            std::string last = str.substr(start);
+            trim(last);
+            if (!last.empty()) lines.push_back(last);
           }
 
-          // ---- REPONSE COMPLETE : on dispatch sur les lignes accumulees ----
-          std::vector<std::string> lines = line_buf;
-          line_buf.clear();
-
-          // Débloque le round-robin (slam-odom.yaml) : la réponse
-          // précédente est bien terminée, il peut envoyer la commande
-          // suivante en toute sécurité. Sans ça, GetLDSScan (~1.5s de
-          // réponse) se faisait interrompre par la commande suivante
-          // envoyée 500ms plus tard par le timer, corrompant les deux
-          // flux (confirmé sur robot réel : fragments "T_WHEEL_EXTENDED,0"
-          // et "Sensor,mm,255," juste après un GetLDSScan).
+          // Débloque le round-robin (slam-odom.yaml) : avec \x1A comme
+          // délimiteur ESPHome, cette lambda ne se déclenche qu'une fois
+          // par réponse COMPLÈTE - donc dès qu'on est ici, la réponse
+          // précédente est forcément terminée.
           id(g_awaiting_response) = false;
 
-          // S'il restait du texte apres le \x1A (deja le debut de la
-          // prochaine reponse), on ne le perd pas : on le remet en attente.
-          trim(remainder);
-          if (!remainder.empty()) line_buf.push_back(remainder);
-
           if (lines.empty()) return;
+
 
           // ---- DETECT WHICH COMMAND WAS USED ----
           std::string command = lines[0];  // first line (GetErr, GetState, etc.)
