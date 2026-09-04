@@ -253,8 +253,26 @@ script:
           // au lieu d'une zone continue, malgré une odométrie qui
           // progresse normalement. GetMotor reste majoritaire (5/10)
           // pour une odométrie fluide entre deux scans.
-          static const int SEQ[10] = {
-            3, 4, 3, 0, 3, 4, 3, 1, 3, 2
+          // GetLDSScan très majoritaire (7 passages sur 15) : même en
+          // doublant sa fréquence précédente (1 sur 8 -> 2 sur 10), le
+          // recouvrement entre scans consécutifs restait insuffisant à
+          // vitesse réelle de nettoyage - confirmé sur robot réel, carte
+          // toujours fragmentée en îlots déconnectés malgré une
+          // odométrie qui progresse correctement. GetMotor reste présent
+          // (6/15) pour garder une odométrie utilisable entre deux
+          // scans, mais GetDigitalSensors/GetAnalogSensors/SetMotor
+          // deviennent très occasionnels (1/15 chacun) - plus aucune
+          // sécurité automatique n'en dépend actuellement, juste des
+          // flags exposés en MQTT à titre informatif.
+          // ATTENTION : GetLDSScan reste intrinsèquement lent (~3.6s de
+          // réponse côté robot, incompressible) - c'est le vrai plancher
+          // de fréquence possible avec cette architecture de polling sur
+          // un seul fil UART partagé. Si ça ne suffit toujours pas, la
+          // vraie solution serait de ralentir la vitesse de déplacement
+          // du robot pendant la cartographie, pas de pousser davantage
+          // ce round-robin.
+          static const int SEQ[15] = {
+            4, 3, 4, 3, 4, 0, 4, 3, 4, 3, 4, 1, 4, 3, 2
           };
 
           if (id(g_slam_poll_paused)) {
@@ -277,7 +295,7 @@ script:
           }
 
           int step = id(g_slam_poll_step);
-          id(g_slam_poll_step) = (step + 1) % 10;
+          id(g_slam_poll_step) = (step + 1) % 15;
           int action = SEQ[step];
 
           if (!id(g_pending_cmd).empty() && action != 0 && action != 1) {
