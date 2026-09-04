@@ -209,7 +209,11 @@ uart:
   baud_rate: 115200
   tx_pin: ${uart_tx}
   rx_pin: ${uart_rx}
-  rx_buffer_size: 2048
+  # 2048 (valeur d'origine) est trop petit pour GetLDSScan (~360 lignes,
+  # ~6-7Ko) - c'est indépendant du délimiteur \x1A (conservé tel quel
+  # ci-dessous) ou de TestMode : purement une question de taille mémoire
+  # pour accumuler la réponse avant qu'ESPHome ne déclenche la lambda.
+  rx_buffer_size: 8192
   debug:
     dummy_receiver: true
     direction: RX
