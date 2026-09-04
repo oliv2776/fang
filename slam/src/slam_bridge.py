@@ -399,9 +399,31 @@ class SlamBridge(Node):
         ts = float(data.get('timestamp', time.time()))
 
         with self._odom_lock:
-            if self._prev_left_mm is None:
-                # Premier message : on initialise juste la référence,
-                # pas de delta calculable encore.
+            # Un retour à (quasi) zéro simultané des DEUX roues signale un
+            # nouveau cycle de nettoyage démarré côté robot (le Neato
+            # réinitialise lui-même son compteur d'encodeur cumulé au
+            # début de chaque session) - PAS un vrai mouvement de -1 à
+            # -2m en une seule lecture. Confirmé sur robot réel : chaque
+            # nouveau "Clean Spot"/House envoyé faisait retomber
+            # left_mm/right_mm à 0.00 simultanément, que le seuil
+            # d'aberration (proportionnel à dt) laissait ensuite passer
+            # comme un déplacement réel, téléportant la pose et cassant
+            # la cohérence de la carte slam_toolbox à chaque relance.
+            # Traité exactement comme le tout premier message : on
+            # réinitialise juste la référence, sans intégrer de delta.
+            is_fresh_reset = (
+                self._prev_left_mm is not None
+                and abs(left_mm) < 2.0 and abs(right_mm) < 2.0
+                and (abs(self._prev_left_mm) > 2.0 or abs(self._prev_right_mm) > 2.0)
+            )
+
+            if self._prev_left_mm is None or is_fresh_reset:
+                if is_fresh_reset:
+                    self.get_logger().info(
+                        "Reset compteur roues détecté (nouveau cycle de "
+                        "nettoyage côté robot) - référence réinitialisée, "
+                        "pas de delta intégré pour ce message."
+                    )
                 self._prev_left_mm = left_mm
                 self._prev_right_mm = right_mm
                 self._prev_odom_ts = ts
