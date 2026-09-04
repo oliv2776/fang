@@ -372,6 +372,77 @@ def calibrate_wheel_base(cal: Calibrator):
         print("Annulé, empattement non modifié.")
 
 
+def test_negative_distance(cal: Calibrator):
+    print("\n" + "=" * 60)
+    print("TEST DIAGNOSTIC — Distance négative sur une seule roue")
+    print("=" * 60)
+    print("Aucune trace, dans toute la documentation communautaire existante,")
+    print("d'un test confirmé avec une distance NÉGATIVE envoyée à SetMotor -")
+    print("l'auteur original n'a documenté que des valeurs positives (\"drive")
+    print("forward\"). Ce test isole UNE SEULE roue (l'autre explicitement")
+    print("désactivée) pour observer précisément ce qui se passe : la roue")
+    print("recule-t-elle vraiment, reste-t-elle immobile (valeur ignorée),")
+    print("ou avance-t-elle quand même (signe ignoré) ?\n")
+
+    confirm = input("Robot sur sol dégagé, prêt ? (o/N) ")
+    if confirm.lower() != 'o':
+        print("Annulé.")
+        return
+
+    cal.send_cmd("pause_polling")
+    time.sleep(1)
+    cal.send_cmd("raw:TestMode on")
+    time.sleep(0.3)
+
+    before = cal.sample_wheels()
+    if not before:
+        print(err("Pas de lecture GetMotor initiale, abandon."))
+        cal.send_cmd("resume_polling")
+        return
+    print(f"Avant : left={before['left_mm']}mm right={before['right_mm']}mm")
+
+    test_mm = -100
+    print(f"\nEnvoi de SetMotor sur la roue DROITE UNIQUEMENT "
+          f"(RWheelDist {test_mm}, gauche explicitement désactivée)...")
+    cal.send_cmd(f"raw:SetMotor RWheelDist {test_mm} LWheelDisable Speed 20")
+    print("Observe ATTENTIVEMENT la roue droite - avance, recule, ou immobile ?")
+    time.sleep(4)
+
+    after = cal.sample_wheels()
+    cal.send_cmd("raw:SetMotor LWheelDisable RWheelDisable")
+    cal.send_cmd("raw:TestMode off")
+    cal.send_cmd("resume_polling")
+    if not after:
+        print(err("Pas de lecture GetMotor finale, abandon."))
+        return
+    print(f"Après : left={after['left_mm']}mm right={after['right_mm']}mm")
+
+    delta_right = after['right_mm'] - before['right_mm']
+    print(f"\nDelta roue droite : {delta_right:+.1f}mm (commandé : {test_mm}mm)")
+
+    if abs(delta_right) < 5:
+        print(warn(
+            "Delta quasi nul : la valeur négative semble être IGNORÉE par "
+            "le robot (roue traitée comme si aucune commande n'avait été "
+            "envoyée pour elle) - explique le comportement asymétrique "
+            "observé lors du test d'empattement."
+        ))
+    elif delta_right < -5:
+        print(ok(
+            "Delta négatif confirmé : la roue a bien reculé - une distance "
+            "négative fonctionne réellement pour ce sens. Le souci observé "
+            "précédemment vient peut-être d'autre chose (timing, les deux "
+            "roues envoyées dans la MÊME commande plutôt que testées "
+            "séparément)."
+        ))
+    else:
+        print(warn(
+            "Delta POSITIF malgré une commande négative : le signe semble "
+            "ignoré par le robot (traité comme une valeur absolue) - la "
+            "roue a avancé au lieu de reculer."
+        ))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Calibration guidée Neato D7 gen3")
     parser.add_argument("--broker", default=read_env_default("MQTT_BROKER", "192.168.10.108"))
@@ -379,6 +450,8 @@ def main():
     parser.add_argument("--prefix", default=read_env_default("MQTT_PREFIX", "neato/robot"))
     parser.add_argument("--skip-wheel-base", action="store_true",
                          help="Ne propose même pas l'étape 3 (expérimentale)")
+    parser.add_argument("--test-negative", action="store_true",
+                         help="Lance uniquement le test diagnostic de distance négative, sans le reste")
     parser.add_argument("-u", "--username", default=read_env_default("MQTT_USERNAME", ""))
     parser.add_argument("-P", "--password", default=read_env_default("MQTT_PASSWORD", ""))
     args = parser.parse_args()
@@ -387,10 +460,13 @@ def main():
     time.sleep(1.5)
 
     try:
-        calibrate_drop_threshold(cal)
-        calibrate_distance_scale(cal)
-        if not args.skip_wheel_base:
-            calibrate_wheel_base(cal)
+        if args.test_negative:
+            test_negative_distance(cal)
+        else:
+            calibrate_drop_threshold(cal)
+            calibrate_distance_scale(cal)
+            if not args.skip_wheel_base:
+                calibrate_wheel_base(cal)
     except KeyboardInterrupt:
         print("\n\nInterrompu. Reprise du round-robin normal par sécurité...")
         cal.send_cmd("resume_polling")
