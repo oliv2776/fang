@@ -513,9 +513,24 @@ uart:
             id(g_safety_wheel_extended) = wheel_extended;
 
             if (bump || wheel_extended) {
-              // ARRET IMMEDIAT, sans attendre le prochain tour du round-robin.
-              id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+              // g_safety_stop se verrouille TOUJOURS immédiatement, quel
+              // que soit l'état du bus - pas cher (juste un booléen),
+              // aucune écriture UART impliquée à ce stade.
               id(g_safety_stop) = true;
+              // L'écriture immédiate du Disable, elle, ne se fait QUE si
+              // le bus est libre (aucune réponse en vol) - sans ça, on
+              // recréait exactement le genre de collision qu'on a
+              // corrigé ailleurs (écriture directe hors synchronisation,
+              // signalé lors d'un audit du 4 septembre). Si le bus est
+              // occupé, on laisse le round-robin s'en charger à son
+              // prochain passage sur SetMotor (action==2, qui vérifie
+              // déjà g_safety_stop) - légèrement moins immédiat, mais
+              // jamais de corruption.
+              if (!id(g_awaiting_response)) {
+                id(g_awaiting_response) = true;
+                id(g_awaiting_response_since_ms) = millis();
+                id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+              }
             }
           }
 
@@ -567,8 +582,12 @@ uart:
             id(g_safety_cliff) = cliff;
 
             if (cliff) {
-              id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
               id(g_safety_stop) = true;
+              if (!id(g_awaiting_response)) {
+                id(g_awaiting_response) = true;
+                id(g_awaiting_response_since_ms) = millis();
+                id(uart_bus).write_str("SetMotor LWheelDisable RWheelDisable \n");
+              }
             }
 
             // Publication MQTT du statut de securite complet (3 flags +
