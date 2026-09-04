@@ -237,6 +237,13 @@ def guided_mode(diag: Diagnostics):
         )
         if test_setmotor.lower() == 'o':
             input("Entrée pour envoyer un SetMotor de test très court...")
+            # SetMotor est documenté "(TestMode Only)" - pause_polling a
+            # coupé le round-robin, seule chose qui réaffirmait TestMode
+            # on en temps normal. Sans ce renvoi explicite, SetMotor est
+            # silencieusement ignoré (confirmé sur robot réel : delta
+            # encodeur nul, aucune erreur visible).
+            diag.send_cmd("raw:TestMode on")
+            time.sleep(0.3)
             diag.send_cmd("raw:SetMotor RWheelDist 50 LWheelDist 50 Speed 20")
             time.sleep(2)
             diag.send_cmd("raw:SetMotor LWheelDisable RWheelDisable")
@@ -255,8 +262,8 @@ def main():
     parser.add_argument("--prefix", default=read_env_default("MQTT_PREFIX", "neato/robot"),
                          help="Doit matcher MQTT_PREFIX")
     parser.add_argument("--guided", action="store_true", help="Lance le mode test guidé (commande par commande)")
-    parser.add_argument("--username", default=read_env_default("MQTT_USERNAME", ""))
-    parser.add_argument("--password", default=read_env_default("MQTT_PASSWORD", ""))
+    parser.add_argument("-u", "--username", default=read_env_default("MQTT_USERNAME", ""))
+    parser.add_argument("-P", "--password", default=read_env_default("MQTT_PASSWORD", ""))
     args = parser.parse_args()
 
     diag = Diagnostics(args.broker, args.port, args.prefix, args.username, args.password)
