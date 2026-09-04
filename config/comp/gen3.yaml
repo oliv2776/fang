@@ -493,7 +493,182 @@ uart:
                 id(numberDustBinFull).publish_state(atof(val.c_str()));
               } 
             }
-          } else if (command.find("ARCHES Board") != std::string::npos) id(uiState).publish_state("Starting...");
+          }
+
+          // ==== AJOUTS SLAM (projet fang/vacuula) ====
+          // Les branches ci-dessous s'ajoutent au dispatch existant, sans
+          // toucher a une seule ligne de ce qui precede. Volontairement
+          // minimales : pas de reaffirmation TestMode, pas d'ecriture UART
+          // directe pour la securite (juste des flags exposes en MQTT,
+          // observables mais non-actionnants pour l'instant) - l'objectif
+          // immediat est de retrouver un robot qui bouge, pas de reajouter
+          // tout de suite tout ce qui a pu interferer par le passe.
+
+          else if (command == "GetMotor") {
+            bool have_left = false, have_right = false;
+            double left_mm = 0.0, right_mm = 0.0;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              size_t comma = line.find(',');
+              if (comma == std::string::npos) continue;
+              std::string key = line.substr(0, comma);
+              std::string value = line.substr(comma + 1);
+              trim(key);
+              trim(value);
+              if (key == "LeftWheel_PositionInMM") {
+                left_mm = atof(value.c_str());
+                have_left = true;
+              } else if (key == "RightWheel_PositionInMM") {
+                right_mm = atof(value.c_str());
+                have_right = true;
+              }
+            }
+
+            if (have_left && have_right) {
+              double ts = millis() / 1000.0;
+              char payload[128];
+              int len = snprintf(
+                  payload, sizeof(payload),
+                  "{\"left_mm\":%.2f,\"right_mm\":%.2f,\"timestamp\":%.3f}",
+                  left_mm, right_mm, ts
+              );
+              if (len > 0 && len < (int) sizeof(payload)) {
+                id(g_pub_wheels_payload) = std::string(payload, len);
+                id(g_pub_wheels_pending) = true;
+              }
+            }
+          }
+
+          else if (command == "GetDigitalSensors") {
+            bool bump = false;
+            bool wheel_extended = false;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              size_t comma = line.find(',');
+              if (comma == std::string::npos) continue;
+              std::string key = line.substr(0, comma);
+              std::string value = line.substr(comma + 1);
+              trim(key);
+              trim(value);
+              bool is_set = (value == "1");
+
+              if (key == "SNSR_LEFT_WHEEL_EXTENDED" || key == "SNSR_RIGHT_WHEEL_EXTENDED") {
+                if (is_set) wheel_extended = true;
+              } else if (key == "LSIDEBIT" || key == "LFRONTBIT" ||
+                         key == "RSIDEBIT" || key == "RFRONTBIT") {
+                if (is_set) bump = true;
+              }
+            }
+
+            // Flags exposes en MQTT uniquement - AUCUNE ecriture UART
+            // automatique ici pour l'instant (retire a la demande : ca
+            // coupait le nettoyage natif en plein vol par le passe).
+            id(g_safety_bump) = bump;
+            id(g_safety_wheel_extended) = wheel_extended;
+          }
+
+          else if (command == "GetAnalogSensors") {
+            bool cliff = false;
+            int drop_left_mm = -1;
+            int drop_right_mm = -1;
+
+            for (size_t i = 2; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              size_t c1 = line.find(',');
+              if (c1 == std::string::npos) continue;
+              size_t c2 = line.find(',', c1 + 1);
+              if (c2 == std::string::npos) continue;
+              size_t c3 = line.find(',', c2 + 1);
+
+              std::string key = line.substr(0, c1);
+              std::string value_str = (c3 == std::string::npos)
+                  ? line.substr(c2 + 1)
+                  : line.substr(c2 + 1, c3 - c2 - 1);
+              trim(key);
+              trim(value_str);
+
+              if (key == "DropSensorLeft" || key == "DropSensorRight") {
+                int value = atoi(value_str.c_str());
+                if (key == "DropSensorLeft") drop_left_mm = value;
+                else drop_right_mm = value;
+                if (value > id(g_cal_drop_threshold_mm)) cliff = true;
+              }
+            }
+
+            id(g_safety_cliff) = cliff;
+
+            char safety_payload[220];
+            int slen = snprintf(
+                safety_payload, sizeof(safety_payload),
+                "{\"bump\":%s,\"cliff\":%s,\"wheel_extended\":%s,"
+                "\"drop_left_mm\":%d,\"drop_right_mm\":%d,\"drop_threshold_mm\":%.1f,"
+                "\"timestamp\":%.3f}",
+                id(g_safety_bump) ? "true" : "false",
+                id(g_safety_cliff) ? "true" : "false",
+                id(g_safety_wheel_extended) ? "true" : "false",
+                drop_left_mm, drop_right_mm, id(g_cal_drop_threshold_mm),
+                millis() / 1000.0
+            );
+            if (slen > 0 && slen < (int) sizeof(safety_payload)) {
+              id(g_pub_safety_payload) = std::string(safety_payload, slen);
+              id(g_pub_safety_pending) = true;
+            }
+          }
+
+          else if (command == "GetLDSScan") {
+            static float ranges_m[360];
+            static bool got_point[360];
+            for (int i = 0; i < 360; i++) { ranges_m[i] = INFINITY; got_point[i] = false; }
+
+            for (size_t i = 1; i < lines.size(); i++) {
+              std::string &line = lines[i];
+              if (line.empty()) continue;
+              if (!std::isdigit(static_cast<unsigned char>(line[0]))) continue;
+
+              size_t p1 = line.find(',');
+              if (p1 == std::string::npos) continue;
+              size_t p2 = line.find(',', p1 + 1);
+              std::string angle_str = line.substr(0, p1);
+              std::string dist_str = (p2 == std::string::npos)
+                  ? line.substr(p1 + 1)
+                  : line.substr(p1 + 1, p2 - p1 - 1);
+
+              int angle_deg = atoi(angle_str.c_str());
+              int dist_mm = atoi(dist_str.c_str());
+
+              if (angle_deg < 0 || angle_deg >= 360) continue;
+              if (dist_mm <= 0) continue;
+              if (dist_mm < 100 || dist_mm > 8000) continue;
+
+              ranges_m[angle_deg] = dist_mm / 1000.0f;
+              got_point[angle_deg] = true;
+            }
+
+            static char json_buf[4096];
+            size_t pos = 0;
+            pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "{\"ranges\":[");
+            for (int i = 0; i < 360 && pos < sizeof(json_buf) - 16; i++) {
+              if (got_point[i]) {
+                pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "%.3f", ranges_m[i]);
+              } else {
+                pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, "null");
+              }
+              if (i < 359) pos += snprintf(json_buf + pos, sizeof(json_buf) - pos, ",");
+            }
+            pos += snprintf(json_buf + pos, sizeof(json_buf) - pos,
+                             "],\"angle_min\":0.0,\"angle_max\":6.2657,"
+                             "\"angle_increment\":0.017453,\"timestamp\":%.3f}",
+                             millis() / 1000.0);
+
+            if (pos > 0 && pos < sizeof(json_buf)) {
+              id(g_pub_scan_payload) = std::string(json_buf, pos);
+              id(g_pub_scan_pending) = true;
+            }
+          }
+
+          else if (command.find("ARCHES Board") != std::string::npos) id(uiState).publish_state("Starting...");
 
 
 time:
