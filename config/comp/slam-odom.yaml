@@ -174,6 +174,42 @@ globals:
     restore_value: false
     initial_value: 'false'
 
+  # --- Publications MQTT différées (voir gen3.yaml) ---
+  # Le traitement d'une réponse UART (GetMotor/GetDigitalSensors/
+  # GetAnalogSensors/GetLDSScan) calcule le payload et le stocke ici au
+  # lieu d'appeler neato_mqtt.publish() directement dans la lambda de
+  # réception UART. Un appel MQTT (I/O réseau, cf logs "mqtt took a long
+  # time for an operation") pouvait retarder la lecture des octets UART
+  # suivants pile pendant que le nettoyage natif conduit activement -
+  # confirmé en comparant avec le firmware original (vacuula/fang), qui
+  # ne fait aucun traitement de ce genre dans son propre gestionnaire
+  # UART et n'a jamais ce symptôme. Un script séparé (voir plus bas)
+  # vide ces drapeaux hors du chemin critique UART.
+  - id: g_pub_wheels_pending
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_pub_wheels_payload
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: g_pub_safety_pending
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_pub_safety_payload
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: g_pub_scan_pending
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: g_pub_scan_payload
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+
   # --- Calibration (réglable à chaud via MQTT, persistée en flash) ---
   # Voir slam/calibrate.py pour la procédure de mesure. Valeurs initiales
   # = points de départ arbitraires tant qu'aucune calibration n'a été
@@ -488,3 +524,24 @@ interval:
   - interval: ${slam_poll_interval}
     then:
       - script.execute: slam_poll_cycle
+
+  # Vidage des publications MQTT différées (voir globals g_pub_*_pending
+  # dans slam-odom.yaml et leur remplissage dans gen3.yaml). Volontairement
+  # plus rapide que slam_poll_interval et totalement indépendant du
+  # round-robin UART - le seul but est de sortir l'appel .publish()
+  # (réseau, potentiellement lent) du gestionnaire de réception UART.
+  - interval: 50ms
+    then:
+      - lambda: !lambda |-
+          if (id(g_pub_wheels_pending)) {
+            id(g_pub_wheels_pending) = false;
+            id(neato_mqtt).publish("${mqtt_wheels_topic}", id(g_pub_wheels_payload), 0, false);
+          }
+          if (id(g_pub_safety_pending)) {
+            id(g_pub_safety_pending) = false;
+            id(neato_mqtt).publish("${mqtt_safety_topic}", id(g_pub_safety_payload), 1, false);
+          }
+          if (id(g_pub_scan_pending)) {
+            id(g_pub_scan_pending) = false;
+            id(neato_mqtt).publish("${mqtt_scan_topic}", id(g_pub_scan_payload), 0, false);
+          }
