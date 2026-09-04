@@ -212,44 +212,44 @@ def calibrate_drop_threshold(cal: Calibrator):
 
 def calibrate_distance_scale(cal: Calibrator):
     print("\n" + "=" * 60)
-    print("ÉTAPE 2 — Échelle distance SetMotor")
+    print("ÉTAPE 2 — Échelle distance (conduite manuelle)")
     print("=" * 60)
-    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~1m en ligne droite).")
-    print("TestMode utilisé ici de façon ponctuelle et isolée (activé juste")
-    print("avant SetMotor, désactivé juste après) - différent de la")
-    print("réaffirmation en continu par le round-robin qui posait problème")
-    print("par le passé.")
-    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 1.5m")
-    print("devant lui. Reste à portée de main.\n")
+    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~1-2m en ligne droite).")
+    print("Utilise la conduite manuelle native (drive_start + FORWARD_DOWN/UP)")
+    print("- confirmée fonctionner sur ce robot, contrairement à SetMotor qui")
+    print("ne produit jamais de mouvement réel. Avance par MAINTIEN d'une durée")
+    print("contrôlée, pas par distance commandée directement.")
+    print("IMPORTANT : le robot doit être COMPLÈTEMENT À L'ARRÊT (pas en pause")
+    print("mi-nettoyage) avant de continuer, sinon le mode conduite ne prend")
+    print("pas correctement - redémarre-le si besoin.")
+    print("Place-le sur un sol DÉGAGÉ, plat, sans obstacle sur au moins 2m")
+    print("devant lui. La brosse et l'aspirateur vont s'activer pendant ce")
+    print("test (comportement normal de ce mode, pas un bug).\n")
 
-    confirm = input("Robot prêt, sol dégagé confirmé ? (o/N) ")
+    confirm = input("Robot à l'arrêt complet, sol dégagé confirmé ? (o/N) ")
     if confirm.lower() != 'o':
         print("Annulé.")
         return
 
-    cal.send_cmd("pause_polling")
-    time.sleep(1)
-    cal.send_cmd("raw:TestMode on")
-    time.sleep(0.3)
-
     before = cal.sample_wheels()
     if not before:
         print(err("Pas de lecture GetMotor initiale, abandon."))
-        cal.send_cmd("raw:TestMode off")
-        cal.send_cmd("resume_polling")
         return
     print(f"Avant : left={before['left_mm']}mm right={before['right_mm']}mm")
 
-    commanded_mm = 1000
-    speed = 50
-    print(f"\nEnvoi de SetMotor ({commanded_mm}mm, vitesse {speed})...")
-    print("Observe le robot avancer. Attends qu'il s'arrête tout seul...")
-    cal.send_cmd(f"raw:SetMotor RWheelDist {commanded_mm} LWheelDist {commanded_mm} Speed {speed}")
-    time.sleep(8)
+    cal.send_cmd("drive_start")
+    time.sleep(1)
+
+    hold_s = 3.0
+    print(f"\nAvance maintenue pendant {hold_s}s...")
+    cal.send_cmd("drive:FORWARD_DOWN")
+    time.sleep(hold_s)
+    cal.send_cmd("drive:FORWARD_UP")
+    time.sleep(0.5)
+    cal.send_cmd("drive_stop")
+    time.sleep(1)
 
     after = cal.sample_wheels()
-    cal.send_cmd("raw:TestMode off")
-    cal.send_cmd("resume_polling")
     if not after:
         print(err("Pas de lecture GetMotor finale, abandon."))
         return
@@ -259,33 +259,39 @@ def calibrate_distance_scale(cal: Calibrator):
     delta_left = after['left_mm'] - before['left_mm']
     delta_right = after['right_mm'] - before['right_mm']
     encoder_avg = (abs(delta_left) + abs(delta_right)) / 2
-    print(f"\nDelta encodeur : left={delta_left:+.1f}mm right={delta_right:+.1f}mm "
-          f"(moyenne={encoder_avg:.1f}mm, commandé={commanded_mm}mm)")
+    print(f"\nDistance encodeur : left={delta_left:+.1f}mm right={delta_right:+.1f}mm "
+          f"(moyenne={encoder_avg:.1f}mm)")
 
-    if encoder_avg < 5:
+    if encoder_avg < 20:
         print(err(
-            "Delta quasi nul (<5mm) - le robot n'a probablement pas bougé "
-            "du tout malgré TestMode actif. Abandon de cette méthode."
+            "Distance quasi nulle (<20mm) - le robot n'a probablement pas "
+            "vraiment bougé. Vérifie qu'il était bien à l'arrêt complet "
+            "(pas en pause) avant drive_start, et relance."
         ))
         return
 
     measured = input(
         "\nMesure maintenant la distance RÉELLEMENT parcourue au sol (mètre "
-        "ruban, en mm), ou Entrée pour utiliser uniquement la valeur "
-        "encodeur ci-dessus : "
+        "ruban, en mm) : "
     ).strip()
 
-    if measured:
-        try:
-            physical_mm = float(measured)
-            scale = physical_mm / commanded_mm
-            print(f"Échelle physique (mesure au sol / commandé) : {scale:.4f}")
-        except ValueError:
-            print(warn("Valeur non numérique, on retombe sur l'encodeur."))
-            scale = encoder_avg / commanded_mm if commanded_mm else 1.0
-    else:
-        scale = encoder_avg / commanded_mm if commanded_mm else 1.0
-        print(f"Échelle encodeur (delta encodeur / commandé) : {scale:.4f}")
+    if not measured:
+        print("Rien mesuré, abandon (pas de référence physique pour calculer "
+              "l'échelle).")
+        return
+
+    try:
+        physical_mm = float(measured)
+    except ValueError:
+        print(err("Valeur non numérique, abandon."))
+        return
+
+    if physical_mm <= 0:
+        print(err("Distance mesurée nulle ou négative, abandon."))
+        return
+
+    scale = physical_mm / encoder_avg
+    print(f"Échelle (mesure au sol / distance encodeur) : {scale:.4f}")
 
     if scale <= 0 or scale > 3.0:
         print(err(f"Valeur d'échelle suspecte ({scale:.4f}), hors de [0, 3] - abandon, rien envoyé."))
@@ -302,15 +308,17 @@ def calibrate_distance_scale(cal: Calibrator):
 
 def calibrate_wheel_base(cal: Calibrator):
     print("\n" + "=" * 60)
-    print("ÉTAPE 3 (OPTIONNELLE, EXPÉRIMENTALE) — Empattement (wheel_base)")
+    print("ÉTAPE 3 (OPTIONNELLE) — Empattement (wheel_base)")
     print("=" * 60)
-    print("⚠️ Repose sur une rotation pure (une roue avance, l'autre recule)")
-    print("via SetMotor avec une distance NÉGATIVE sur une roue - jamais")
-    print("confirmé fonctionner sur ce robot (aucune trace documentée d'un")
-    print("test réussi avec une valeur négative). TestMode utilisé ici de")
-    print("façon ponctuelle et isolée, comme à l'Étape 2.\n")
+    print("Utilise la conduite manuelle native (TURN_LEFT_DOWN/UP) - rotation")
+    print("sur place par maintien d'une durée contrôlée. On mesure les vrais")
+    print("deltas d'encodeur de chaque roue (pas une valeur supposée), donc")
+    print("plus précis que l'ancienne méthode SetMotor (de toute façon non")
+    print("fonctionnelle).")
+    print("IMPORTANT : robot à l'arrêt complet (pas en pause) avant de")
+    print("continuer.\n")
 
-    confirm = input("Continuer quand même ? (o/N) ")
+    confirm = input("Continuer ? (o/N) ")
     if confirm.lower() != 'o':
         print("Étape sautée.")
         return
@@ -319,18 +327,36 @@ def calibrate_wheel_base(cal: Calibrator):
           "flèche de direction...) avant de continuer.")
     input("Prêt ? Entrée pour lancer la rotation de test...")
 
-    cal.send_cmd("pause_polling")
-    time.sleep(1)
-    cal.send_cmd("raw:TestMode on")
-    time.sleep(0.3)
+    before = cal.sample_wheels()
+    if not before:
+        print(err("Pas de lecture GetMotor initiale, abandon."))
+        return
 
-    rot_mm = 150  # petite rotation, prudence
-    cal.send_cmd(f"raw:SetMotor RWheelDist {rot_mm} LWheelDist -{rot_mm} Speed 20")
-    print("Observe la rotation. Attends l'arrêt complet...")
-    time.sleep(6)
-    cal.send_cmd("raw:SetMotor LWheelDisable RWheelDisable")
-    cal.send_cmd("raw:TestMode off")
-    cal.send_cmd("resume_polling")
+    cal.send_cmd("drive_start")
+    time.sleep(1)
+
+    hold_s = 1.5
+    print(f"\nRotation maintenue pendant {hold_s}s...")
+    cal.send_cmd("drive:TURN_LEFT_DOWN")
+    time.sleep(hold_s)
+    cal.send_cmd("drive:TURN_LEFT_UP")
+    time.sleep(0.5)
+    cal.send_cmd("drive_stop")
+    time.sleep(1)
+
+    after = cal.sample_wheels()
+    if not after:
+        print(err("Pas de lecture GetMotor finale, abandon."))
+        return
+
+    delta_left_m = (after['left_mm'] - before['left_mm']) / 1000.0
+    delta_right_m = (after['right_mm'] - before['right_mm']) / 1000.0
+    print(f"\nDelta encodeur : left={delta_left_m*1000:+.1f}mm "
+          f"right={delta_right_m*1000:+.1f}mm")
+
+    if abs(delta_left_m) < 0.005 and abs(delta_right_m) < 0.005:
+        print(err("Deltas quasi nuls - le robot n'a probablement pas tourné. Abandon."))
+        return
 
     angle_str = input(
         "\nMesure l'angle RÉELLEMENT tourné (degrés, au jugé avec un "
@@ -348,10 +374,10 @@ def calibrate_wheel_base(cal: Calibrator):
     import math
     angle_rad = math.radians(angle_deg)
     # Cinématique différentielle : angle = (delta_right - delta_left) / wheel_base
-    # delta_right - delta_left = 2 * rot_mm (roues en sens opposés)
-    wheel_base_m = (2 * rot_mm / 1000.0) / angle_rad
-    print(f"\nEmpattement calculé : {wheel_base_m:.4f} m (mesuré: {angle_deg}° pour "
-          f"±{rot_mm}mm par roue)")
+    # Utilise les VRAIS deltas mesurés (pas une valeur commandée supposée).
+    wheel_base_m = abs(delta_right_m - delta_left_m) / angle_rad
+    print(f"\nEmpattement calculé : {wheel_base_m:.4f} m (mesuré: {angle_deg}° "
+          f"pour delta_right-delta_left={abs(delta_right_m - delta_left_m)*1000:.1f}mm)")
 
     if wheel_base_m <= 0.05 or wheel_base_m > 0.6:
         print(err(f"Valeur suspecte ({wheel_base_m:.4f}m), hors de [0.05, 0.6] - abandon."))
@@ -448,11 +474,8 @@ def main():
     parser.add_argument("--broker", default=read_env_default("MQTT_BROKER", "192.168.10.108"))
     parser.add_argument("--port", type=int, default=int(read_env_default("MQTT_PORT", "1883")))
     parser.add_argument("--prefix", default=read_env_default("MQTT_PREFIX", "neato/robot"))
-    parser.add_argument("--with-wheel-base", action="store_true",
-                         help="Propose l'étape 3 (empattement, expérimentale) - "
-                              "désactivée par défaut par prudence : distance "
-                              "négative sur SetMotor jamais confirmée fonctionner "
-                              "sur ce robot")
+    parser.add_argument("--skip-wheel-base", action="store_true",
+                         help="Ne propose pas l'étape 3 (empattement)")
     parser.add_argument("--test-negative", action="store_true",
                          help="Lance uniquement le test diagnostic de distance négative, sans le reste")
     parser.add_argument("-u", "--username", default=read_env_default("MQTT_USERNAME", ""))
@@ -468,14 +491,8 @@ def main():
         else:
             calibrate_drop_threshold(cal)
             calibrate_distance_scale(cal)
-            if args.with_wheel_base:
+            if not args.skip_wheel_base:
                 calibrate_wheel_base(cal)
-            else:
-                print(warn(
-                    "\nÉtape 3 (empattement) sautée par défaut - repose sur une "
-                    "distance négative jamais confirmée fonctionner. Relance "
-                    "avec --with-wheel-base si tu veux essayer."
-                ))
     except KeyboardInterrupt:
         print("\n\nInterrompu. Reprise du round-robin normal par sécurité...")
         cal.send_cmd("resume_polling")
