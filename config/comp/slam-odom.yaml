@@ -329,15 +329,19 @@ script:
           // tâches "normales" se partagent le 3e pas restant, une fois
           // chacune par cycle complet (18 pas).
           // 0=GetDigitalSensors, 1=GetAnalogSensors, 2=SetMotor,
-          // 3=GetMotor, 4=GetLDSScan, 5=GetErr, 6=GetState, 7=GetCharger,
-          // 8=TestMode on, 9=SetLDSRotation on
+          // 3=GetMotor, 4=GetLDSScan, 5=GetErr, 6=GetState, 7=GetCharger
           //
-          // 8 et 9 réaffirment périodiquement TestMode/SetLDSRotation -
-          // les deux sont documentés "(TestMode Only)" dans
-          // research/serial.md (SetLDSRotation ET SetMotor en dépendent),
-          // et rien ne garantit que le robot y reste indéfiniment tout
-          // seul. Envoi idempotent (réaffirmer un état déjà actif est sans
-          // risque), donc pas besoin d'ordonnancement strict avec le reste.
+          // TestMode/SetLDSRotation ne sont PLUS réaffirmés ici (retiré) :
+          // les deux sont documentés "(TestMode Only)" et coupent le
+          // nettoyage natif (House/Spot) dès qu'ils sont envoyés pendant
+          // qu'un cycle est en cours - confirmé sur robot réel, le
+          // nettoyage démarré via bouton physique ou "raw:Clean Spot..."
+          // s'interrompait systématiquement ~10-15s après (le temps qu'un
+          // tour du round-robin retombe sur cette action), impossible à
+          // relancer ensuite (TestMode restait actif). TestMode/
+          // SetLDSRotation ne sont désormais envoyés qu'à la demande,
+          // explicitement, via pause_polling + injection "raw:..." (voir
+          // slam/calibrate.py) - jamais en tâche de fond.
           //
           // GetErr/GetState/GetCharger ont été RAPATRIÉS ici depuis le
           // bloc "interval:" de gen3.yaml (retiré) - ils tournaient avant
@@ -347,9 +351,9 @@ script:
           // les logs). Ce script est maintenant le SEUL point d'écriture
           // sur ce bus UART partagé - ne rajoute jamais un uart.write:
           // ailleurs dans la config sans passer par ce mécanisme.
-          static const int SEQ[24] = {
-            0, 1, 2,  0, 1, 3,  0, 1, 4,  0, 1, 5,
-            0, 1, 6,  0, 1, 7,  0, 1, 8,  0, 1, 9
+          static const int SEQ[18] = {
+            0, 1, 2,  0, 1, 3,  0, 1, 4,
+            0, 1, 5,  0, 1, 6,  0, 1, 7
           };
 
           // Mode pause (tests isolés) : on n'envoie QUE une commande de
@@ -395,7 +399,7 @@ script:
           }
 
           int step = id(g_slam_poll_step);
-          id(g_slam_poll_step) = (step + 1) % 24;
+          id(g_slam_poll_step) = (step + 1) % 18;
           int action = SEQ[step];
 
           // ---- Injection one-shot prioritaire (brosse/aspirateur) ----
@@ -451,24 +455,6 @@ script:
             id(g_awaiting_response) = true;
             id(g_awaiting_response_since_ms) = millis();
             id(uart_bus).write_str("GetCharger \n");
-            return;
-          }
-          if (action == 8) {
-            id(g_awaiting_response) = true;
-            id(g_awaiting_response_since_ms) = millis();
-            id(uart_bus).write_str("TestMode on \n");
-            return;
-          }
-          if (action == 9) {
-            // NON VÉRIFIÉ : "SetLDSRotation on" suppose la même syntaxe
-            // ("on" en minuscule) que "TestMode on", confirmé lui par un
-            // exemple réel dans research/serial.md - mais pas de capture
-            // équivalente pour SetLDSRotation spécifiquement. À confirmer
-            // avec les logs [W][uart_raw] si le LiDAR ne se met toujours
-            // pas à tourner après ce changement.
-            id(g_awaiting_response) = true;
-            id(g_awaiting_response_since_ms) = millis();
-            id(uart_bus).write_str("SetLDSRotation on \n");
             return;
           }
 
