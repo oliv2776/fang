@@ -112,9 +112,19 @@ globals:
   # isolés (cf test_connectivity.sh / TESTING.md). ATTENTION : suspend
   # aussi la surveillance sécurité automatique - à utiliser robot
   # immobile/supervisé uniquement.
+  #
+  # restore_value: true (persisté en flash) - l'ESP32 est alimenté DEPUIS
+  # le port debug du robot (5V), donc éteindre/rallumer le robot éteint
+  # ET rallume aussi l'ESP32 en même temps : impossible de couper le
+  # robot seul en gardant l'ESP32 (et donc la pause) actif. Avec
+  # restore_value: false, un pause_polling envoyé juste avant un
+  # redémarrage du robot était perdu au reboot de l'ESP32 - impossible
+  # d'obtenir un robot qui démarre sans jamais avoir échangé le moindre
+  # octet avec notre firmware. En persistant l'état, un pause_polling
+  # envoyé avant coupure reste actif après le redémarrage des deux.
   - id: g_slam_poll_paused
     type: bool
-    restore_value: false
+    restore_value: true
     initial_value: 'false'
 
   # --- Synchronisation requête/réponse ---
