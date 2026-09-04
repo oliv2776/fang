@@ -244,8 +244,17 @@ script:
           // en MQTT désormais).
           // 0=GetDigitalSensors, 1=GetAnalogSensors, 2=SetMotor,
           // 3=GetMotor, 4=GetLDSScan
-          static const int SEQ[8] = {
-            3, 0, 3, 1,  3, 2, 3, 4
+          // GetLDSScan doublé (2 passages sur 10 au lieu de 1 sur 8) :
+          // avec la cadence précédente, deux scans consécutifs pouvaient
+          // être séparés de plusieurs mètres de déplacement réel,
+          // laissant trop peu de recouvrement au LiDAR pour que
+          // slam_toolbox recolle les scans entre eux - confirmé sur
+          // robot réel : carte fragmentée en petits îlots déconnectés
+          // au lieu d'une zone continue, malgré une odométrie qui
+          // progresse normalement. GetMotor reste majoritaire (5/10)
+          // pour une odométrie fluide entre deux scans.
+          static const int SEQ[10] = {
+            3, 4, 3, 0, 3, 4, 3, 1, 3, 2
           };
 
           if (id(g_slam_poll_paused)) {
@@ -268,7 +277,7 @@ script:
           }
 
           int step = id(g_slam_poll_step);
-          id(g_slam_poll_step) = (step + 1) % 8;
+          id(g_slam_poll_step) = (step + 1) % 10;
           int action = SEQ[step];
 
           if (!id(g_pending_cmd).empty() && action != 0 && action != 1) {
