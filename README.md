@@ -283,31 +283,41 @@ Le fichier de configuration central est **`config/local.yaml`**, structuré en `
 
 ```yaml
 substitutions:
-  name: neato-vacuum        # nom de l'appareil — à garder cohérent avec la carte HA
-  comment: ""
-  infointerval: 2sec
-  chargerinterval: 2min
-  ota_password: !secret neato_vacuum_ota
-  wifi_ssid: !secret wifi_ssid
-  wifi_password: !secret wifi_password
-  ha_encryption_key: !secret neato_vacuum_api
-  # uart_tx: 17   # à décommenter si vous devez changer les pins UART
-  # uart_rx: 16
+    name: neato-vacuum
+    comment: ""
+    infointerval: 2sec
+    chargerinterval: 2min
+    ota_password: !secret neato_vacuum_ota
+    ### If you are using ha:
+    wifi_ssid: !secret wifi_ssid
+    wifi_password: !secret wifi_password
+    ha_encryption_key: !secret neato_vacuum_api
+    mqtt_username: !secret mqtt_username
+    mqtt_password: !secret mqtt_password
+    ### If you want to change the UART Pins
+    # uart_tx: 17
+    # uart_rx: 16
+
+logger:
+    level: VERY_VERBOSE
+
+wifi:
+    ### If your router sets another TLD for local devices, specify that here
+    # domain: .lan
+    ### If you are having issues with the dns or are 100% this will be the ip, you can spesify that here
+    # use_address: 192.168.205.199
 
 packages:
-  - !include boards/esp32.yaml        # <- carte matérielle : esp32 / esp32c3 / esp32s3 / esp32s2
-  # - !include boards/esp32c3.yaml
-  # - !include boards/esp32s3.yaml
-  # - !include boards/esp32s2.yaml
-
-  - !include comp/ha.yaml             # intégration Home Assistant (ou comp/no-ha.yaml sans HA)
-  # - !include comp/no-ha.yaml
-
-  - !include comp/webserver.yaml      # interface web embarquée (port 80)
-  - !include comp/gen3.yaml           # logique robot gen3 (ou comp/gen2.yaml)
-  # - !include comp/gen2.yaml
-
-  - !include comp/slam-odom.yaml      # pont MQTT vers le conteneur Docker SLAM (facultatif)
+    remote_package_files:
+      url: https://github.com/oliv2776/fang/
+      files:
+        - config/boards/esp32.yaml
+        - config/comp/ha.yaml
+        - config/comp/webserver.yaml
+        - config/comp/gen3.yaml
+        - config/comp/slam-odom.yaml
+      ref: main
+      refresh: 0s
 ```
 
 **Points d'attention** :
