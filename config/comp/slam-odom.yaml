@@ -226,8 +226,26 @@ script:
           // de l'original (gen3.yaml, non modifié) - pas dupliqués ici.
           // 0=GetDigitalSensors, 1=GetAnalogSensors, 2=SetMotor,
           // 3=GetMotor, 4=GetLDSScan
-          static const int SEQ[9] = {
-            0, 1, 2,  0, 1, 3,  0, 1, 4
+          // Séquence retravaillée pour prioriser l'odométrie (GetMotor,
+          // action 3) : avec l'ancienne séquence (1 seul pas sur 9),
+          // GetMotor ne revenait que toutes les ~50s en pratique, dominé
+          // par le temps de réponse propre de GetLDSScan (~3.6s côté
+          // robot, incompressible - pas un goulot d'étranglement ESP32).
+          // Confirmé sur robot réel : /odom quasi figé, carte slam_toolbox
+          // qui progresse à peine malgré un robot qui bouge réellement.
+          // GetMotor revient maintenant 4 fois sur 8 (chaque réponse est
+          // rapide, pas de gros volume à transmettre) ; GetLDSScan garde
+          // 1 seul passage par cycle (son propre temps de réponse reste
+          // le facteur limitant du cycle complet, mais l'odométrie n'a
+          // plus à l'attendre pour progresser). GetDigitalSensors/
+          // GetAnalogSensors gardent 1 passage chacun (plus besoin de 2
+          // pas sur 3 comme avant : plus d'arrêt automatique piloté par
+          // ces lectures, retiré à la demande - juste des flags exposés
+          // en MQTT désormais).
+          // 0=GetDigitalSensors, 1=GetAnalogSensors, 2=SetMotor,
+          // 3=GetMotor, 4=GetLDSScan
+          static const int SEQ[8] = {
+            3, 0, 3, 1,  3, 2, 3, 4
           };
 
           if (id(g_slam_poll_paused)) {
@@ -250,7 +268,7 @@ script:
           }
 
           int step = id(g_slam_poll_step);
-          id(g_slam_poll_step) = (step + 1) % 9;
+          id(g_slam_poll_step) = (step + 1) % 8;
           int action = SEQ[step];
 
           if (!id(g_pending_cmd).empty() && action != 0 && action != 1) {
