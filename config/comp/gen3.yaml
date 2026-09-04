@@ -267,14 +267,17 @@ uart:
 
 
           ESP_LOGI("uart_parser", "COMMAND: %s", command.c_str());
-          // ---- OPTIONAL: print each line for debugging ----
-          for (auto &line : lines) {
-            std::vector<uint8_t> v(line.begin(), line.end());
-            UARTDebug::log_string(direction, v);
-            //ESP_LOGI("uart_parser", "LINE: %s", line.c_str());
-          }
-
-
+          // La boucle "print each line for debugging" du projet original
+          // (marquée OPTIONAL par son propre auteur) a été retirée ici :
+          // elle appelait UARTDebug::log_string() une fois PAR LIGNE,
+          // reconstruisant un std::vector<uint8_t> à chaque itération -
+          // jusqu'à 360 fois pour un seul GetLDSScan. Sans utilité en
+          // usage normal (juste un affichage de debug), et l'auteur
+          // original note lui-même que le débit observé via ESPHome/
+          // réseau/HA était nettement plus lent qu'en connexion série
+          // directe (research/command-experiments.md) - cette boucle est
+          // une source plausible de ce surcoût, indépendante de la
+          // vitesse réelle de transmission du robot.
 
           // ---- SPECIAL PARSING FOR GetErr ----
           if (command == "GetErr") {
