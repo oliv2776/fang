@@ -144,6 +144,29 @@ class Calibrator:
             time.sleep(0.1)
         return self._last_wheels
 
+    def wait_for_movement_start(self, baseline, timeout_s=6.0, threshold_mm=3.0, poll_interval_s=0.4):
+        """Interroge GetMotor en boucle jusqu'à détecter un vrai déplacement
+        par rapport à `baseline` (delta > threshold_mm sur au moins une
+        roue), ou jusqu'au timeout. Sert à ignorer le lag de démarrage du
+        mode conduite manuelle (observé sur robot réel : quelques secondes
+        entre l'envoi de FORWARD_DOWN et le début effectif du mouvement) -
+        sans ça, ce lag variable se retrouvait compté comme du temps de
+        déplacement, faussant l'échelle calculée.
+        Retourne (wheels_au_moment_du_mouvement, temps_ecoule_s) ou
+        (None, None) si rien n'a bougé avant le timeout.
+        """
+        deadline = time.time() + timeout_s
+        start_wait = time.time()
+        while time.time() < deadline:
+            w = self.sample_wheels()
+            if w is not None:
+                d_left = abs(w['left_mm'] - baseline['left_mm'])
+                d_right = abs(w['right_mm'] - baseline['right_mm'])
+                if d_left > threshold_mm or d_right > threshold_mm:
+                    return w, time.time() - start_wait
+            time.sleep(poll_interval_s)
+        return None, None
+
 
 # ------------------------------------------------------------------ étapes
 def calibrate_drop_threshold(cal: Calibrator):
@@ -231,9 +254,13 @@ def calibrate_distance_scale(cal: Calibrator):
         print("Annulé.")
         return
 
+    cal.send_cmd("pause_polling")
+    time.sleep(1)
+
     before = cal.sample_wheels()
     if not before:
         print(err("Pas de lecture GetMotor initiale, abandon."))
+        cal.send_cmd("resume_polling")
         return
     print(f"Avant : left={before['left_mm']}mm right={before['right_mm']}mm")
 
@@ -241,8 +268,22 @@ def calibrate_distance_scale(cal: Calibrator):
     time.sleep(1)
 
     hold_s = 3.0
-    print(f"\nAvance maintenue pendant {hold_s}s...")
+    print(f"\nEnvoi de l'avance (FORWARD_DOWN), en attente du vrai début du "
+          f"mouvement (le lag de démarrage variable est ignoré)...")
     cal.send_cmd("drive:FORWARD_DOWN")
+
+    moved_wheels, wait_time = cal.wait_for_movement_start(before)
+    if moved_wheels is None:
+        print(err("Aucun mouvement détecté dans le délai imparti - abandon."))
+        cal.send_cmd("drive:FORWARD_UP")
+        cal.send_cmd("drive_stop")
+        cal.send_cmd("resume_polling")
+        return
+    print(f"Mouvement détecté après {wait_time:.1f}s de lag "
+          f"(left={moved_wheels['left_mm']}mm right={moved_wheels['right_mm']}mm) "
+          f"- démarrage du chronométrage maintenant.")
+
+    print(f"Maintien pendant {hold_s}s à partir de maintenant...")
     time.sleep(hold_s)
     cal.send_cmd("drive:FORWARD_UP")
     time.sleep(0.5)
@@ -250,6 +291,7 @@ def calibrate_distance_scale(cal: Calibrator):
     time.sleep(1)
 
     after = cal.sample_wheels()
+    cal.send_cmd("resume_polling")
     if not after:
         print(err("Pas de lecture GetMotor finale, abandon."))
         return
@@ -327,9 +369,13 @@ def calibrate_wheel_base(cal: Calibrator):
           "flèche de direction...) avant de continuer.")
     input("Prêt ? Entrée pour lancer la rotation de test...")
 
+    cal.send_cmd("pause_polling")
+    time.sleep(1)
+
     before = cal.sample_wheels()
     if not before:
         print(err("Pas de lecture GetMotor initiale, abandon."))
+        cal.send_cmd("resume_polling")
         return
 
     cal.send_cmd("drive_start")
@@ -345,6 +391,7 @@ def calibrate_wheel_base(cal: Calibrator):
     time.sleep(1)
 
     after = cal.sample_wheels()
+    cal.send_cmd("resume_polling")
     if not after:
         print(err("Pas de lecture GetMotor finale, abandon."))
         return
