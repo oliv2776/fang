@@ -144,29 +144,6 @@ class Calibrator:
             time.sleep(0.1)
         return self._last_wheels
 
-    def wait_for_movement_start(self, baseline, timeout_s=6.0, threshold_mm=3.0, poll_interval_s=0.4):
-        """Interroge GetMotor en boucle jusqu'à détecter un vrai déplacement
-        par rapport à `baseline` (delta > threshold_mm sur au moins une
-        roue), ou jusqu'au timeout. Sert à ignorer le lag de démarrage du
-        mode conduite manuelle (observé sur robot réel : quelques secondes
-        entre l'envoi de FORWARD_DOWN et le début effectif du mouvement) -
-        sans ça, ce lag variable se retrouvait compté comme du temps de
-        déplacement, faussant l'échelle calculée.
-        Retourne (wheels_au_moment_du_mouvement, temps_ecoule_s) ou
-        (None, None) si rien n'a bougé avant le timeout.
-        """
-        deadline = time.time() + timeout_s
-        start_wait = time.time()
-        while time.time() < deadline:
-            w = self.sample_wheels()
-            if w is not None:
-                d_left = abs(w['left_mm'] - baseline['left_mm'])
-                d_right = abs(w['right_mm'] - baseline['right_mm'])
-                if d_left > threshold_mm or d_right > threshold_mm:
-                    return w, time.time() - start_wait
-            time.sleep(poll_interval_s)
-        return None, None
-
 
 # ------------------------------------------------------------------ étapes
 def calibrate_drop_threshold(cal: Calibrator):
@@ -237,11 +214,13 @@ def calibrate_distance_scale(cal: Calibrator):
     print("\n" + "=" * 60)
     print("ÉTAPE 2 — Échelle distance (conduite manuelle)")
     print("=" * 60)
-    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~1-2m en ligne droite).")
+    print("⚠️ Cette étape FAIT BOUGER LE ROBOT (~1.5m en ligne droite).")
     print("Utilise la conduite manuelle native (drive_start + FORWARD_DOWN/UP)")
     print("- confirmée fonctionner sur ce robot, contrairement à SetMotor qui")
-    print("ne produit jamais de mouvement réel. Avance par MAINTIEN d'une durée")
-    print("contrôlée, pas par distance commandée directement.")
+    print("ne produit jamais de mouvement réel. Surveillance continue de la")
+    print("distance parcourue (arrêt automatique à 1.5m, ou 30s en filet de")
+    print("sécurité) - insensible au lag de démarrage variable observé sur")
+    print("ce robot pour l'avance.")
     print("IMPORTANT : le robot doit être COMPLÈTEMENT À L'ARRÊT (pas en pause")
     print("mi-nettoyage) avant de continuer, sinon le mode conduite ne prend")
     print("pas correctement - redémarre-le si besoin.")
@@ -267,24 +246,33 @@ def calibrate_distance_scale(cal: Calibrator):
     cal.send_cmd("drive_start")
     time.sleep(1)
 
-    hold_s = 3.0
-    print(f"\nEnvoi de l'avance (FORWARD_DOWN), en attente du vrai début du "
-          f"mouvement (le lag de démarrage variable est ignoré)...")
+    target_mm = 1500.0
+    max_duration_s = 30.0
+    print(f"\nEnvoi de l'avance (FORWARD_DOWN), surveillance continue de la "
+          f"distance parcourue - arrêt automatique à {target_mm:.0f}mm "
+          f"parcourus, ou après {max_duration_s:.0f}s en filet de sécurité "
+          f"si ça n'avance pas.")
     cal.send_cmd("drive:FORWARD_DOWN")
 
-    moved_wheels, wait_time = cal.wait_for_movement_start(before)
-    if moved_wheels is None:
-        print(err("Aucun mouvement détecté dans le délai imparti - abandon."))
-        cal.send_cmd("drive:FORWARD_UP")
-        cal.send_cmd("drive_stop")
-        cal.send_cmd("resume_polling")
-        return
-    print(f"Mouvement détecté après {wait_time:.1f}s de lag "
-          f"(left={moved_wheels['left_mm']}mm right={moved_wheels['right_mm']}mm) "
-          f"- démarrage du chronométrage maintenant.")
+    start_time = time.time()
+    last = before
+    while True:
+        elapsed = time.time() - start_time
+        w = cal.sample_wheels()
+        if w is not None:
+            last = w
+            d_left = abs(w['left_mm'] - before['left_mm'])
+            d_right = abs(w['right_mm'] - before['right_mm'])
+            d_avg = (d_left + d_right) / 2
+            print(f"  [{elapsed:.1f}s] distance parcourue ≈ {d_avg:.0f}mm")
+            if d_avg >= target_mm:
+                print(ok(f"Cible de {target_mm:.0f}mm atteinte."))
+                break
+        if elapsed >= max_duration_s:
+            print(warn(f"Filet de sécurité {max_duration_s:.0f}s atteint - arrêt."))
+            break
+        time.sleep(0.5)
 
-    print(f"Maintien pendant {hold_s}s à partir de maintenant...")
-    time.sleep(hold_s)
     cal.send_cmd("drive:FORWARD_UP")
     time.sleep(0.5)
     cal.send_cmd("drive_stop")
@@ -293,8 +281,9 @@ def calibrate_distance_scale(cal: Calibrator):
     after = cal.sample_wheels()
     cal.send_cmd("resume_polling")
     if not after:
-        print(err("Pas de lecture GetMotor finale, abandon."))
-        return
+        print(warn("Pas de lecture GetMotor finale fraîche - utilise la "
+                    "dernière lecture valide obtenue pendant la surveillance."))
+        after = last
     print(f"Après : left={after['left_mm']}mm right={after['right_mm']}mm")
 
 
