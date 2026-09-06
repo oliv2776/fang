@@ -190,7 +190,7 @@ class NeatoZoneMapCard extends HTMLElement {
     this.shadowRoot.getElementById('btnDock').addEventListener('click', () => this._returnToDock());
     this.shadowRoot.getElementById('btnToggleDrive').addEventListener('click', () => this._toggleDrivePad());
     this._wireDriveButton('drvUp', 'forward_down', 'forward_up');
-    this._wireDriveButton('drvDown', 'backward_down', 'backward_up');
+    this._wireDriveButton('drvDown', 'backwards_down', 'backwards_up');
     this._wireDriveButton('drvLeft', 'turn_left_down', 'turn_left_up');
     this._wireDriveButton('drvRight', 'turn_right_down', 'turn_right_up');
 
