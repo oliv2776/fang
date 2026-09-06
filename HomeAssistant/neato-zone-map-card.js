@@ -148,7 +148,9 @@ class NeatoZoneMapCard extends HTMLElement {
         </div>
         <div class="drive-hint" id="driveHint">
           Maintiens le bouton appuyé pour avancer/tourner - relâche pour arrêter.
-          Vitesse volontairement lente et bridée par le serveur.
+          L'aspirateur et la brosse s'activent pendant la conduite (comportement
+          normal, mode "nettoyage manuel" natif). Le robot doit être à l'arrêt
+          complet avant d'ouvrir ce pavé.
         </div>
 
         <div class="save-form" id="saveForm">
@@ -187,10 +189,10 @@ class NeatoZoneMapCard extends HTMLElement {
     this.shadowRoot.getElementById('btnDockNative').addEventListener('click', () => this._returnToDockNative());
     this.shadowRoot.getElementById('btnDock').addEventListener('click', () => this._returnToDock());
     this.shadowRoot.getElementById('btnToggleDrive').addEventListener('click', () => this._toggleDrivePad());
-    this._wireDriveButton('drvUp', 0.1, 0);
-    this._wireDriveButton('drvDown', -0.1, 0);
-    this._wireDriveButton('drvLeft', 0, 0.4);
-    this._wireDriveButton('drvRight', 0, -0.4);
+    this._wireDriveButton('drvUp', 'forward_down', 'forward_up');
+    this._wireDriveButton('drvDown', 'backward_down', 'backward_up');
+    this._wireDriveButton('drvLeft', 'turn_left_down', 'turn_left_up');
+    this._wireDriveButton('drvRight', 'turn_right_down', 'turn_right_up');
 
     this._fetchMap();
     this._fetchSafety();
@@ -434,22 +436,26 @@ class NeatoZoneMapCard extends HTMLElement {
     const hint = this.shadowRoot.getElementById('driveHint');
     const visible = pad.classList.toggle('visible');
     hint.classList.toggle('visible', visible);
-    if (!visible) this._sendTeleop(0, 0); // sécurité : coupe si on referme pendant un appui
+    if (visible) {
+      // Le robot doit être à l'arrêt complet (UIMGR_STATE_IDLE) pour que
+      // ce mode prenne effet correctement - confirmé sur robot réel (ne
+      // fonctionne pas s'il est en pause mi-nettoyage).
+      this._sendDrive('start');
+    } else {
+      this._sendDrive('stop'); // sécurité : coupe si on referme pendant un appui
+    }
   }
 
-  _wireDriveButton(id, linearX, angularZ) {
+  _wireDriveButton(id, downAction, upAction) {
     const btn = this.shadowRoot.getElementById(id);
-    let interval = null;
 
     const start = (e) => {
       e.preventDefault();
       if (this._safetyStop) return;
-      this._sendTeleop(linearX, angularZ);
-      interval = setInterval(() => this._sendTeleop(linearX, angularZ), 600);
+      this._sendDrive(downAction);
     };
     const stop = () => {
-      if (interval) { clearInterval(interval); interval = null; }
-      this._sendTeleop(0, 0);
+      this._sendDrive(upAction);
     };
 
     btn.addEventListener('pointerdown', start);
@@ -458,13 +464,13 @@ class NeatoZoneMapCard extends HTMLElement {
     btn.addEventListener('pointercancel', stop);
   }
 
-  async _sendTeleop(linearX, angularZ) {
+  async _sendDrive(action) {
+    // action = "start" | "stop" | "forward_down" | "forward_up" | ...
+    const endpoint = (action === 'start' || action === 'stop')
+      ? `/api/drive/${action}`
+      : `/api/drive/${action}`;
     try {
-      const res = await fetch(`${this._apiBase}/api/teleop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ linear_x: linearX, angular_z: angularZ }),
-      });
+      const res = await fetch(`${this._apiBase}${endpoint}`, { method: 'POST' });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         this._setStatus(`Conduite: ${data.error || res.status}`);
