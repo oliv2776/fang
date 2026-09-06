@@ -470,7 +470,7 @@ class SlamServer(Node):
         # correctement si le robot est en pause mi-nettoyage.
         DRIVE_ACTIONS = {
             "forward_down", "forward_up",
-            "backward_down", "backward_up",
+            "backwards_down", "backwards_up",
             "turn_left_down", "turn_left_up",
             "turn_right_down", "turn_right_up",
             "arc_left_down", "arc_left_up",
