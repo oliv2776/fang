@@ -239,15 +239,20 @@ def calibrate_distance_scale(cal: Calibrator):
         return
     print(f"Avant : left={before['left_mm']}mm right={before['right_mm']}mm")
 
+    print("Activation du mode conduite manuelle (comme ouvrir le pavé dans HA)...")
     cal.send_cmd("drive_start")
-    time.sleep(1)
+    print("Attente de 4s avant d'appuyer sur avancer (marge de sécurité - la "
+          "commande précédente doit vraiment partir avant la suivante, sans "
+          "pause_polling le round-robin peut mettre plus d'une seconde à "
+          "vider la file d'attente)...")
+    time.sleep(4)
 
     target_mm = 1500.0
     max_duration_s = 30.0
-    print(f"\nEnvoi de l'avance (FORWARD_DOWN), surveillance continue de la "
-          f"distance parcourue - arrêt automatique à {target_mm:.0f}mm "
-          f"parcourus, ou après {max_duration_s:.0f}s en filet de sécurité "
-          f"si ça n'avance pas.")
+    print(f"\nAppui sur avancer (FORWARD_DOWN, comme un clic maintenu sur le "
+          f"bouton HA), surveillance continue de la distance parcourue - "
+          f"arrêt automatique à {target_mm:.0f}mm parcourus, ou après "
+          f"{max_duration_s:.0f}s en filet de sécurité si ça n'avance pas.")
     cal.send_cmd("drive:FORWARD_DOWN")
 
     start_time = time.time()
