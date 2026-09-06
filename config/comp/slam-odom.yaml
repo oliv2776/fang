@@ -203,7 +203,11 @@ text_sensor:
   #     (conduite manuelle native, ex: "drive:FORWARD_DOWN", "drive:FORWARD_UP")
   #   "drive_start" -> UIMGR_EVENT_SMARTAPP_START_MANUAL_CLEANING (à envoyer
   #     une fois avant tout "drive:...", pour entrer en mode conduite)
-  #   "drive_stop" -> UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_BTN_TIMEOUT
+  #   "drive_stop" -> UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_BTN_TIMEOUT (arrête
+  #     le mouvement uniquement)
+  #   "drive_end_cleaning" -> UIMGR_EVENT_SMARTAPP_STOP_CLEANING (coupe
+  #     vraiment la session : aspirateur + brosse compris - à envoyer à la
+  #     toute fin, après drive_stop)
   - platform: mqtt_subscribe
     id: clean_cmd_in
     topic: ${mqtt_clean_cmd_topic}
@@ -243,7 +247,16 @@ text_sensor:
             } else if (x == "drive_stop") {
               std::string cmd = "SetEvent event UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_BTN_TIMEOUT SKey " + id(robot_skey) + " \n";
               id(g_pending_cmd) = cmd;
-              ESP_LOGW("drive", "Arret conduite manuelle");
+              ESP_LOGW("drive", "Arret conduite manuelle (mouvement)");
+            } else if (x == "drive_end_cleaning") {
+              // Coupe VRAIMENT la session (aspirateur + brosse compris) -
+              // drive_stop (BTN_TIMEOUT ci-dessus) n'arrête que le
+              // mouvement, pas le cycle de nettoyage manuel lui-même.
+              // Confirmé sur robot réel : aspirateur/brosse restaient
+              // actifs après drive_stop seul.
+              std::string cmd = "SetEvent event UIMGR_EVENT_SMARTAPP_STOP_CLEANING SKey " + id(robot_skey) + " \n";
+              id(g_pending_cmd) = cmd;
+              ESP_LOGW("drive", "Fin de session conduite manuelle (aspirateur/brosse coupes)");
             } else if (x.rfind("drive:", 0) == 0) {
               std::string suffix = x.substr(6);
               std::string cmd = "SetEvent event UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_" + suffix + " SKey " + id(robot_skey) + " \n";
