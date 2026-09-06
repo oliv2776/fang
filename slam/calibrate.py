@@ -254,6 +254,10 @@ def calibrate_distance_scale(cal: Calibrator):
           f"arrêt automatique à {target_mm:.0f}mm parcourus, ou après "
           f"{max_duration_s:.0f}s en filet de sécurité si ça n'avance pas.")
     cal.send_cmd("drive:FORWARD_DOWN")
+    print("Attente de 2s avant de commencer les lectures GetMotor - sans ça, "
+          "la toute première lecture pourrait écraser FORWARD_DOWN dans la "
+          "file d'attente avant même qu'il ne soit envoyé au robot.")
+    time.sleep(2)
 
     start_time = time.time()
     last = before
