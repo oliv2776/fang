@@ -276,21 +276,28 @@ def calibrate_distance_scale(cal: Calibrator):
         if elapsed >= max_duration_s:
             print(warn(f"Filet de sécurité {max_duration_s:.0f}s atteint - arrêt."))
             break
-        time.sleep(0.5)
+        time.sleep(0.2)
 
     cal.send_cmd("drive:FORWARD_UP")
     time.sleep(0.5)
-    cal.send_cmd("drive_stop")
-    time.sleep(0.5)
-    cal.send_cmd("drive_end_cleaning")
-    time.sleep(1)
 
+    # Lecture de la position finale AVANT d'envoyer drive_stop/
+    # drive_end_cleaning : STOP_CLEANING réinitialise très probablement le
+    # compteur d'encodeur côté robot (même comportement observé avec
+    # Clean Spot/House plus tôt dans le projet) - lire après aurait
+    # comparé "before" à une valeur fraîchement remise à zéro, faussant
+    # complètement le delta calculé.
     after = cal.sample_wheels()
     if not after:
         print(warn("Pas de lecture GetMotor finale fraîche - utilise la "
                     "dernière lecture valide obtenue pendant la surveillance."))
         after = last
     print(f"Après : left={after['left_mm']}mm right={after['right_mm']}mm")
+
+    cal.send_cmd("drive_stop")
+    time.sleep(0.5)
+    cal.send_cmd("drive_end_cleaning")
+    time.sleep(1)
 
 
     delta_left = after['left_mm'] - before['left_mm']
