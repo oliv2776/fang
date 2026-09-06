@@ -42,6 +42,12 @@ from tf2_ros import LookupException, ConnectivityException, ExtrapolationExcepti
 import diagnostics
 
 try:
+    import paho.mqtt.client as mqtt
+    HAS_MQTT = True
+except ImportError:
+    HAS_MQTT = False
+
+try:
     from flask import Flask, jsonify, request, Response
     from flask_cors import CORS
     HAS_FLASK = True
@@ -70,6 +76,25 @@ class SlamServer(Node):
         self.mqtt_username = self.declare_parameter('mqtt_username', '').value
         self.mqtt_password = self.declare_parameter('mqtt_password', '').value
         self.mqtt_prefix = self.declare_parameter('mqtt_prefix', 'neato/robot').value
+
+        # --- Client MQTT persistant pour la conduite manuelle native ---
+        # Distinct du pipeline ROS2 (teleop_pub/cmd_vel) : ce dernier
+        # aboutit à SetMotor côté ESP32, confirmé sur robot réel comme ne
+        # produisant JAMAIS de mouvement, quel que soit TestMode. La
+        # conduite manuelle native (SetEvent DRIVE_MANUAL_*) est la SEULE
+        # méthode confirmée faire réellement avancer le robot - elle passe
+        # par le topic MQTT clean_cmd directement, pas par ROS2/cmd_vel.
+        self._drive_mqtt = None
+        if HAS_MQTT:
+            self._drive_mqtt = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION1)
+            if self.mqtt_username:
+                self._drive_mqtt.username_pw_set(self.mqtt_username, self.mqtt_password)
+            try:
+                self._drive_mqtt.connect(self.mqtt_broker, self.mqtt_port, keepalive=30)
+                self._drive_mqtt.loop_start()
+            except Exception as e:
+                self.get_logger().error(f"Connexion MQTT conduite manuelle échouée: {e}")
+                self._drive_mqtt = None
 
         # --- État (protégé par _lock) ---
         self._map = None
@@ -166,6 +191,18 @@ class SlamServer(Node):
         msg = String()
         msg.data = json.dumps({"polygon": polygon})
         self.zone_pub.publish(msg)
+
+    def _publish_drive_cmd(self, cmd: str) -> bool:
+        if self._drive_mqtt is None:
+            self.get_logger().error("Client MQTT conduite manuelle indisponible")
+            return False
+        topic = f"{self.mqtt_prefix}/clean_cmd"
+        try:
+            self._drive_mqtt.publish(topic, cmd, qos=0, retain=False)
+            return True
+        except Exception as e:
+            self.get_logger().error(f"Publication conduite manuelle échouée: {e}")
+            return False
 
     def _update_pose_from_tf(self):
         try:
@@ -420,6 +457,60 @@ class SlamServer(Node):
             twist.angular.z = angular_z
             self.teleop_pub.publish(twist)
             return jsonify({"status": "ok", "linear_x": linear_x, "angular_z": angular_z})
+
+        # ---- Conduite manuelle native (drive_start/drive/drive_stop) ----
+        # Remplace /api/teleop (ci-dessus) comme méthode de contrôle direct
+        # du robot : /api/teleop passe par cmd_vel -> SetMotor côté ESP32,
+        # confirmé sur robot réel comme ne produisant JAMAIS de mouvement,
+        # avec ou sans TestMode. La conduite manuelle native (SetEvent
+        # UIMGR_EVENT_SMARTAPP_DRIVE_MANUAL_*) EST confirmée fonctionner -
+        # c'est la seule méthode de contrôle direct fiable sur ce robot à
+        # ce jour. Nécessite que le robot soit à l'arrêt complet
+        # (UIMGR_STATE_IDLE) avant /api/drive/start - ne prend pas effet
+        # correctement si le robot est en pause mi-nettoyage.
+        DRIVE_ACTIONS = {
+            "forward_down", "forward_up",
+            "backward_down", "backward_up",
+            "turn_left_down", "turn_left_up",
+            "turn_right_down", "turn_right_up",
+            "arc_left_down", "arc_left_up",
+            "arc_right_down", "arc_right_up",
+        }
+
+        @app.route('/api/drive/start', methods=['POST'])
+        def drive_start():
+            with self._lock:
+                if self._safety_stop:
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de continuer"
+                    }), 409
+            ok = self._publish_drive_cmd("drive_start")
+            if not ok:
+                return jsonify({"error": "publication MQTT échouée"}), 500
+            return jsonify({"status": "drive_start_sent"})
+
+        @app.route('/api/drive/stop', methods=['POST'])
+        def drive_stop():
+            ok = self._publish_drive_cmd("drive_stop")
+            if not ok:
+                return jsonify({"error": "publication MQTT échouée"}), 500
+            return jsonify({"status": "drive_stop_sent"})
+
+        @app.route('/api/drive/<action>', methods=['POST'])
+        def drive_action(action):
+            if action not in DRIVE_ACTIONS:
+                return jsonify({"error": f"action inconnue: {action}",
+                                 "actions_valides": sorted(DRIVE_ACTIONS)}), 400
+            with self._lock:
+                if self._safety_stop and action.endswith("_down"):
+                    return jsonify({
+                        "error": "safety_stop actif, vérifie le robot avant de continuer"
+                    }), 409
+            suffix = action.upper()
+            ok = self._publish_drive_cmd(f"drive:{suffix}")
+            if not ok:
+                return jsonify({"error": "publication MQTT échouée"}), 500
+            return jsonify({"status": "sent", "action": action})
 
         @app.route('/api/clean/stop', methods=['POST'])
         def stop_cleaning():
