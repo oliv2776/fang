@@ -233,13 +233,9 @@ def calibrate_distance_scale(cal: Calibrator):
         print("Annulé.")
         return
 
-    cal.send_cmd("pause_polling")
-    time.sleep(1)
-
     before = cal.sample_wheels()
     if not before:
         print(err("Pas de lecture GetMotor initiale, abandon."))
-        cal.send_cmd("resume_polling")
         return
     print(f"Avant : left={before['left_mm']}mm right={before['right_mm']}mm")
 
@@ -276,10 +272,11 @@ def calibrate_distance_scale(cal: Calibrator):
     cal.send_cmd("drive:FORWARD_UP")
     time.sleep(0.5)
     cal.send_cmd("drive_stop")
+    time.sleep(0.5)
+    cal.send_cmd("drive_end_cleaning")
     time.sleep(1)
 
     after = cal.sample_wheels()
-    cal.send_cmd("resume_polling")
     if not after:
         print(warn("Pas de lecture GetMotor finale fraîche - utilise la "
                     "dernière lecture valide obtenue pendant la surveillance."))
@@ -377,6 +374,8 @@ def calibrate_wheel_base(cal: Calibrator):
     cal.send_cmd("drive:TURN_LEFT_UP")
     time.sleep(0.5)
     cal.send_cmd("drive_stop")
+    time.sleep(0.5)
+    cal.send_cmd("drive_end_cleaning")
     time.sleep(1)
 
     after = cal.sample_wheels()
